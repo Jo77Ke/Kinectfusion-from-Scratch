@@ -16,6 +16,7 @@ add_executable(${PROJECT_NAME}
         "libs/FreeImageHelper.cpp"
         "src/main.cpp"
         "src/VirtualSensor.h"
+        "src/BilateralFilter.h"
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE

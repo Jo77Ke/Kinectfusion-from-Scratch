@@ -3,6 +3,9 @@
 
 #include "Eigen.h"
 #include "VirtualSensor.h"
+#include "BilateralFilter.h"
+
+#define BILATERAL_FILTERING true
 
 struct Vertex {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -108,7 +111,8 @@ bool WriteMesh(Vertex *vertices, unsigned int width, unsigned int height, const 
 
 int main() {
     std::string filenameIn = "./data/rgbd_dataset_freiburg1_xyz/";
-    std::string filenameBaseOut = "mesh_";
+    std::string outputDirectory = "./results/";
+    std::string filenameBaseOut = BILATERAL_FILTERING ? "smoothMesh_" : "mesh_";
 
     // load video
     std::cout << "Initialize virtual sensor..." << std::endl;
@@ -120,19 +124,26 @@ int main() {
 
     // convert video to meshes
     while (sensor.ProcessNextFrame()) {
+        const auto imageWidth = sensor.GetDepthImageWidth();
+        const auto imageHeight = sensor.GetDepthImageHeight();
+
         // get ptr to the current depth frame
         // depth is stored in row major (get dimensions via sensor.GetDepthImageWidth() / GetDepthImageHeight())
         float *depthMap = sensor.GetDepth();
+
+        float filteredDepthMap[imageWidth * imageHeight];
+        if (BILATERAL_FILTERING) {
+            const int sigma_s = 8; // controls filter region: the larger -> the more distant pixels contribute -> more smoothing
+            const int sigma_r = 25; // controls allowed depth difference: the larger -> smooths higher contrasts -> edges may be blurred
+            bilateralFilter(depthMap, imageWidth, imageHeight, filteredDepthMap, sigma_s, sigma_r);
+        }
+
         // get ptr to the current color frame
         // color is stored as RGBX in row major (4 byte values per pixel, get dimensions via sensor.GetColorImageWidth() / GetColorImageHeight())
         BYTE *colorMap = sensor.GetColorRGBX();
 
         // get depth intrinsics
         Matrix3f depthIntrinsics = sensor.GetDepthIntrinsics();
-        float fovX = depthIntrinsics(0, 0);
-        float fovY = depthIntrinsics(1, 1);
-        float cX = depthIntrinsics(0, 2);
-        float cY = depthIntrinsics(1, 2);
 
         // compute inverse depth extrinsics
         Matrix4f depthExtrinsicsInv = sensor.GetDepthExtrinsics().inverse();
@@ -149,13 +160,11 @@ int main() {
         Vertex *vertices = new Vertex[sensor.GetDepthImageWidth() * sensor.GetDepthImageHeight()];
 
         Matrix3f depthIntrinsicsInv = depthIntrinsics.inverse();
-        const auto imageWidth = sensor.GetDepthImageWidth();
-        const auto imageHeight = sensor.GetDepthImageHeight();
 
         for (int u = 0; u < imageWidth; ++u) {
             for (int v = 0; v < imageHeight; ++v) {
                 const auto idx = u + v * imageWidth;
-                float depthValue = depthMap[idx];
+                float depthValue = BILATERAL_FILTERING ? filteredDepthMap[idx] : depthMap[idx];
                 if (depthValue == MINF) {
                     vertices[idx].position = Vector4f(MINF, MINF, MINF, MINF);
                     vertices[idx].color = Vector4uc(0, 0, 0, 0);
@@ -175,7 +184,7 @@ int main() {
 
         // write mesh file
         std::stringstream ss;
-        ss << filenameBaseOut << sensor.GetCurrentFrameCnt() << ".off";
+        ss << outputDirectory << filenameBaseOut << sensor.GetCurrentFrameCnt() << ".off";
         if (!WriteMesh(vertices, sensor.GetDepthImageWidth(), sensor.GetDepthImageHeight(), ss.str())) {
             std::cout << "Failed to write mesh!\nCheck file path!" << std::endl;
             return -1;
