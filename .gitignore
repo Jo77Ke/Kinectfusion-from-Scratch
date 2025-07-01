@@ -40,6 +40,12 @@
 # debug information files
 *.dwo
 
+.idea
 data/
+build
+results
+
 .DS_Store
 ._*
+
+kinectfusion
