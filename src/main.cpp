@@ -109,6 +109,49 @@ bool WriteMesh(Vertex *vertices, unsigned int width, unsigned int height, const 
     return true;
 }
 
+Vertex* computeNormalMap(Vertex *vertexMap, const unsigned int imageWidth, const unsigned int imageHeight) {
+    Vertex *normalMap = new Vertex[imageWidth * imageHeight];
+
+    for (unsigned int v = 0; v < imageHeight; ++v) {
+        for (unsigned int u = 0; u < imageWidth; ++u) {
+            const unsigned int idx = u + v * imageWidth;
+
+            // check if u+1, v+1 are in the image
+            if (u < imageWidth - 1 && v < imageHeight - 1) {
+                const unsigned int idxRight = (u + 1) + v * imageWidth;
+                const unsigned int idxDown  = u + (v + 1) * imageHeight;
+
+                const Vector4f& p     = vertexMap[idx].position;
+                const Vector4f& pRight = vertexMap[idxRight].position;
+                const Vector4f& pDown  = vertexMap[idxDown].position;
+
+                // check for MINF
+                if (p.x() != MINF && pRight.x() != MINF && pDown.x() != MINF) {
+                    // du = V(u+1, v) - V(u,v), dv = V(u, v+1) - V(u,v)
+                    Vector3f du = pRight.head<3>() - p.head<3>();
+                    Vector3f dv = pDown.head<3>() - p.head<3>();
+
+                    // cross product
+                    Vector3f normal = du.cross(dv).normalized();
+
+                    normalMap[idx].position = Vector4f(normal.x(), normal.y(), normal.z(), 0.0f);
+                } else {
+                    // at least one point invalid -> normal vector invalid
+                    normalMap[idx].position = Vector4f(MINF, MINF, MINF, MINF);
+                }
+            } else {
+                // neighbours dont exist -> invalid
+                normalMap[idx].position = Vector4f(MINF, MINF, MINF, MINF);
+            }
+
+            // color to 0
+            normalMap[idx].color = Vector4uc(0, 0, 0, 0);
+        }
+    }
+
+    return normalMap;
+}
+
 int main() {
     std::string filenameIn = "./data/rgbd_dataset_freiburg1_xyz/";
     std::string outputDirectory = "./results/";
@@ -182,6 +225,8 @@ int main() {
             }
         }
 
+        Vertex* normalMap = computeNormalMap(vertices, imageWidth, imageHeight);
+
         // write mesh file
         std::stringstream ss;
         ss << outputDirectory << filenameBaseOut << sensor.GetCurrentFrameCnt() << ".off";
@@ -190,8 +235,10 @@ int main() {
             return -1;
         }
 
+
         // free mem
         delete[] vertices;
+        delete[] normalMap;
     }
 
     return 0;
