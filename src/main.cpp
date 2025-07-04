@@ -12,6 +12,10 @@ struct Vertex {
 
     // position stored as 4 floats (4th component is supposed to be 1.0)
     Vector4f position;
+
+    // normals stored as 4 floats (4th component is supposed to be 1.0)
+    Vector4f normals;
+
     // color stored as 4 unsigned char
     Vector4uc color;
 };
@@ -19,25 +23,21 @@ struct Vertex {
 bool WriteMesh(Vertex *vertices, unsigned int width, unsigned int height, const std::string &filename) {
     float edgeThreshold = 0.01f; // 1cm
 
-    // TODO 2: use the OFF file format to save the vertices grid (http://www.geomview.org/docs/html/OFF.html)
-    // - have a look at the "off_sample.off" file to see how to store the vertices and triangles
-    // - for debugging we recommend to first only write out the vertices (set the number of faces to zero)
-    // - for simplicity write every vertex to file, even if it is not valid (position.x() == MINF) (note that all vertices in the off file have to be valid, thus, if a point is not valid write out a dummy point like (0,0,0))
-    // - use a simple triangulation exploiting the grid structure (neighboring vertices build a triangle, two triangles per grid cell)
-    // - you can use an arbitrary triangulation of the cells, but make sure that the triangles are consistently oriented
-    // - only write triangles with valid vertices and an edge length smaller then edgeThreshold
-
-    // TODO: Get number of vertices
+    // Get number of vertices
     unsigned int nVertices = width * height;
 
-    // TODO: Get number of faces
+    // Get number of faces
     std::vector<std::tuple<unsigned int, unsigned int, unsigned int>> faces;
     for (int u = 0; u < width - 1; ++u) {
         for (int v = 0; v < height - 1; ++v) {
             /*
+             * Simple neighborhood-based triangulation:
+             *
              * a - b
              * | \ |
              * c - d
+             *
+             * Only write triangles with valid vertices and an edge length smaller than the threshold.
              */
             unsigned int idxA = u + v * width;
             unsigned int idxB = u + 1 + v * width;
@@ -79,7 +79,7 @@ bool WriteMesh(Vertex *vertices, unsigned int width, unsigned int height, const 
     outFile << "COFF" << std::endl;
     outFile << nVertices << " " << nFaces << " 0" << std::endl;
 
-    // TODO: save vertices
+    // save vertices
     for (int idx = 0; idx < nVertices; ++idx) {
         Vertex v = vertices[idx];
         if (v.position.x() != MINF) {
@@ -94,7 +94,7 @@ bool WriteMesh(Vertex *vertices, unsigned int width, unsigned int height, const 
         }
     }
 
-    // TODO: save faces
+    // save faces
     for (const auto &face: faces) {
         outFile << "3 "
                 << std::get<0>(face) << " "
@@ -109,16 +109,14 @@ bool WriteMesh(Vertex *vertices, unsigned int width, unsigned int height, const 
     return true;
 }
 
-Vertex* computeNormalMap(Vertex *vertexMap, const unsigned int imageWidth, const unsigned int imageHeight) {
-    Vertex *normalMap = new Vertex[imageWidth * imageHeight];
-
+void computeNormals(Vertex *const vertexMap, const unsigned int imageWidth, const unsigned int imageHeight) {
     for (unsigned int v = 0; v < imageHeight; ++v) {
         for (unsigned int u = 0; u < imageWidth; ++u) {
             const unsigned int idx = u + v * imageWidth;
 
             // check if u+1, v+1 are in the image
             if (u < imageWidth - 1 && v < imageHeight - 1) {
-                const unsigned int idxRight = (u + 1) + v * imageWidth;
+                const unsigned int idxRight = (u + 1) + v * idx+1;
                 const unsigned int idxDown  = u + (v + 1) * imageHeight;
 
                 const Vector4f& p     = vertexMap[idx].position;
@@ -131,25 +129,17 @@ Vertex* computeNormalMap(Vertex *vertexMap, const unsigned int imageWidth, const
                     Vector3f du = pRight.head<3>() - p.head<3>();
                     Vector3f dv = pDown.head<3>() - p.head<3>();
 
-                    // cross product
-                    Vector3f normal = du.cross(dv).normalized();
-
-                    normalMap[idx].position = Vector4f(normal.x(), normal.y(), normal.z(), 0.0f);
+                    vertexMap[idx].normals = du.cross(dv).normalized();
                 } else {
                     // at least one point invalid -> normal vector invalid
-                    normalMap[idx].position = Vector4f(MINF, MINF, MINF, MINF);
+                    vertexMap[idx].normals = Vector4f(MINF, MINF, MINF, MINF);
                 }
             } else {
                 // neighbours dont exist -> invalid
-                normalMap[idx].position = Vector4f(MINF, MINF, MINF, MINF);
+                vertexMap[idx].normals = Vector4f(MINF, MINF, MINF, MINF);
             }
-
-            // color to 0
-            normalMap[idx].color = Vector4uc(0, 0, 0, 0);
         }
     }
-
-    return normalMap;
 }
 
 int main() {
@@ -194,12 +184,6 @@ int main() {
         Matrix4f trajectory = sensor.GetTrajectory();
         Matrix4f trajectoryInv = sensor.GetTrajectory().inverse();
 
-        // TODO 1: back-projection
-        // write result to the vertices array below, keep pixel ordering!
-        // if the depth value at idx is invalid (MINF) write the following values to the vertices array
-        // vertices[idx].position = Vector4f(MINF, MINF, MINF, MINF);
-        // vertices[idx].color = Vector4uc(0,0,0,0);
-        // otherwise apply back-projection and transform the vertex to world space, use the corresponding color from the colormap
         Vertex *vertices = new Vertex[sensor.GetDepthImageWidth() * sensor.GetDepthImageHeight()];
 
         Matrix3f depthIntrinsicsInv = depthIntrinsics.inverse();
@@ -208,7 +192,7 @@ int main() {
             for (int v = 0; v < imageHeight; ++v) {
                 const auto idx = u + v * imageWidth;
                 float depthValue = BILATERAL_FILTERING ? filteredDepthMap[idx] : depthMap[idx];
-                if (depthValue == MINF) {
+                if (depthValue == MINF) { // invalid depth value -> invalid vertex
                     vertices[idx].position = Vector4f(MINF, MINF, MINF, MINF);
                     vertices[idx].color = Vector4uc(0, 0, 0, 0);
                 } else {
@@ -225,7 +209,7 @@ int main() {
             }
         }
 
-        Vertex* normalMap = computeNormalMap(vertices, imageWidth, imageHeight);
+        computeNormals(vertices, imageWidth, imageHeight);
 
         // write mesh file
         std::stringstream ss;
@@ -238,7 +222,6 @@ int main() {
 
         // free mem
         delete[] vertices;
-        delete[] normalMap;
     }
 
     return 0;
