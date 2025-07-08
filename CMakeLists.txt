@@ -9,9 +9,10 @@ find_package(OpenCV REQUIRED)
 
 add_executable(${PROJECT_NAME}
         "src/main.cpp"
-        "src/bilateral_filter.h"
-        "src/rgbd_frame_stream.h"
         "src/utils.h"
+        "src/rgbd_frame_stream.h"
+        "src/frame_data.h"
+        "src/bilateral_filter.h"
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE

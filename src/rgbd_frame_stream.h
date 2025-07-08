@@ -10,6 +10,7 @@
 namespace fs = std::filesystem;
 
 #include "utils.h"
+#include "frame_data.h"
 
 class RGBDFrameStream {
 public:
@@ -30,16 +31,18 @@ public:
 
 
         // Set camera intrinsics and extrinsics
-        depthImageWidth = colorImageWidth = 640;
-        depthImageHeight = colorImageHeight = 480;
+        int imageWidth = 640;
+        int imageHeight = 480;
 
-        depthIntrinsics << 525.0f, 0.0f, 319.5f,
-                            0.0f, 525.0f, 239.5f,
-                            0.0f, 0.0f, 1.0f;
-        colorIntrinsics = depthIntrinsics;
+        Matrix3f intrinsics = (Matrix3f() << 525.0f, 0.0f, 319.5f, 0.0f, 525.0f, 239.5f, 0.0f, 0.0f, 1.0f).finished();
+        auto extrinsics = Matrix4f::Identity();
 
-        depthExtrinsics.setIdentity();
-        colorExtrinsics.setIdentity();
+        cameraSpecifications = CameraSpecifications(
+                imageWidth,
+                imageHeight,
+                intrinsics,
+                extrinsics
+        );
 
 
         // Reset index
@@ -47,104 +50,26 @@ public:
         return true;
     }
 
-    bool processNextFrame() {
+    FrameData processNextFrame() {
         currentFrameIndex = currentFrameIndex == -1 ? 0 : currentFrameIndex + frameStride;
-        if ((unsigned int) currentFrameIndex >= numberOfFrames) return false;
+        if ((unsigned int) currentFrameIndex >= numberOfFrames) throw std::runtime_error("No more frames available");
 
         std::cout << "Processing frame [" << currentFrameIndex << " | " << numberOfFrames << "]" << std::endl;
-
-        // Load depth image
-        std::string depthFilename = baseDirectory / filenamesDepthImages[currentFrameIndex];
-        cv::Mat rawDepthMap = cv::imread(depthFilename, cv::IMREAD_UNCHANGED);
-        if (rawDepthMap.empty() || rawDepthMap.type() != CV_16UC1) {
-            std::cerr << "Failed to load depth image: " << depthFilename << std::endl;
-            return false;
-        }
-
-        // Convert and scale depth map to meters (see https://vision.in.tum.de/data/datasets/rgbd-dataset/file_formats)
-        rawDepthMap.convertTo(currentDepthMap, CV_32FC1, 1.0f / 5000.0f);
-        // Mark invalid depth values (0.0f)
-        currentDepthMap.setTo(MINF, rawDepthMap == 0.0f);
-
-        // Load color image
-        std::string colorFilename = baseDirectory / filenamesColorImages[currentFrameIndex];
-        cv::Mat rawColorMap = cv::imread(colorFilename, cv::IMREAD_COLOR);
-        if (rawColorMap.empty()) {
-            std::cerr << "Failed to load color image: " << colorFilename << std::endl;
-            return false;
-        }
-
-        cv::cvtColor(rawColorMap, currentColorMap, cv::COLOR_BGR2RGBA); // Convert to RGBA format
-
-
-        // Find the closest trajectory
-        double timestamp = depthImagesTimeStamps[currentFrameIndex];
-        double min = std::numeric_limits<double>::max();
-        size_t idx = 0;
-        for (size_t i = 0; i < trajectory.size(); ++i)
-        {
-            double d = abs(trajectoryTimeStamps[i] - timestamp);
-            if (min > d)
-            {
-                min = d;
-                idx = i;
-            }
-        }
-        currentTrajectory = trajectory[idx];
-
-        return true;
+        return {
+                currentFrameIndex,
+                cameraSpecifications,
+                loadDepthMap(),
+                loadColorMap(),
+                findClosestTrajectory()
+        };
     }
 
     unsigned int getCurrentFrameIndex() const {
-        return (unsigned int) currentFrameIndex;
+        return currentFrameIndex;
     }
 
-    unsigned int getNumberOfFrames() const {
-        return numberOfFrames;
-    }
-
-    const cv::Mat& getCurrentDepthMap() const {
-        return currentDepthMap;
-    }
-
-    const cv::Mat& getCurrentColorMap() const {
-        return currentColorMap;
-    }
-
-    const Eigen::Matrix4f& getCurrentTrajectory() const {
-        return currentTrajectory;
-    }
-
-    const Eigen::Matrix3f& getDepthIntrinsics() const {
-        return depthIntrinsics;
-    }
-
-    const Eigen::Matrix3f& getColorIntrinsics() const {
-        return colorIntrinsics;
-    }
-
-    const Eigen::Matrix4f& getDepthExtrinsics() const {
-        return depthExtrinsics;
-    }
-
-    const Eigen::Matrix4f& getColorExtrinsics() const {
-        return colorExtrinsics;
-    }
-
-    unsigned int getDepthImageWidth() const {
-        return depthImageWidth;
-    }
-
-    unsigned int getDepthImageHeight() const {
-        return depthImageHeight;
-    }
-
-    unsigned int getColorImageWidth() const {
-        return colorImageWidth;
-    }
-
-    unsigned int getColorImageHeight() const {
-        return colorImageHeight;
+    bool hasNextFrame() const {
+        return currentFrameIndex == -1 && numberOfFrames > 0 || (unsigned int) currentFrameIndex + frameStride <= numberOfFrames;
     }
 
 private:
@@ -177,12 +102,11 @@ private:
         return true;
     }
 
-    bool readTrajectoryFile(const std::string& filename) {
+    bool readTrajectoryFile(const std::string &filename) {
         std::ifstream file(filename);
         if (!file.is_open()) return false;
 
         trajectory.clear();
-        trajectoryTimeStamps.clear();
         std::string line;
         while (file.good() && std::getline(file, line)) {
             if (line.empty() || line[0] == '#') continue; // Skip comments and empty lines
@@ -198,14 +122,60 @@ private:
             }
 
             Eigen::Matrix4f transformation = Eigen::Matrix4f::Identity();
-            transformation.block<3,3>(0,0) = q.toRotationMatrix();
-            transformation.block<3,1>(0,3) = Eigen::Vector3f(tx, ty, tz);
+            transformation.block<3, 3>(0, 0) = q.toRotationMatrix();
+            transformation.block<3, 1>(0, 3) = Eigen::Vector3f(tx, ty, tz);
             transformation = transformation.inverse().eval(); // Invert to camera pose
 
-            trajectoryTimeStamps.push_back(timestamp);
-            trajectory.push_back(transformation);
+            trajectory.emplace_back(timestamp, transformation);
         }
         return true;
+    }
+
+    cv::Mat loadDepthMap() {
+        const auto depthFilename = baseDirectory / filenamesDepthImages[currentFrameIndex];
+        cv::Mat rawDepthMap = cv::imread(depthFilename, cv::IMREAD_UNCHANGED);
+        if (rawDepthMap.empty()) {
+            throw std::runtime_error("Empty depth image: " + depthFilename.string());
+        }
+        if (rawDepthMap.type() != CV_16UC1) {
+            throw std::runtime_error("Invalid depth format in: " + depthFilename.string());
+        }
+
+        // Convert and scale depth map to meters (see https://vision.in.tum.de/data/datasets/rgbd-dataset/file_formats)
+        cv::Mat depthMap;
+        rawDepthMap.convertTo(depthMap, CV_32FC1, 1.0f / 5000.0f);
+        // Mark invalid depth values (0.0f)
+        depthMap.setTo(MINF, rawDepthMap == 0.0f);
+
+        return depthMap;
+    }
+
+    cv::Mat loadColorMap() {
+        const auto colorFilename = baseDirectory / filenamesColorImages[currentFrameIndex];
+        cv::Mat colorMap = cv::imread(colorFilename, cv::IMREAD_COLOR);
+        if (trajectory.empty()) {
+            throw std::runtime_error("No trajectory data available");
+        }
+
+        cv::cvtColor(colorMap, colorMap, cv::COLOR_BGR2RGBA); // Convert to RGBA format
+
+        return colorMap;
+    }
+
+    Matrix4f findClosestTrajectory() {
+        double timestamp = depthImagesTimeStamps[currentFrameIndex];
+        if (trajectory.empty()) {
+            throw std::runtime_error("No trajectory data available");
+        }
+        auto closestTrajectory = std::min_element(
+                trajectory.begin(),
+                trajectory.end(),
+                [timestamp](const auto &a, const auto &b) {
+                    return std::abs(a.first - timestamp) < std::abs(b.first - timestamp);
+                }
+        );
+
+        return closestTrajectory->second;
     }
 
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -215,22 +185,13 @@ private:
     unsigned int numberOfFrames{};
     int frameStride; // only every frameStride-th frame is used
 
+
     cv::Mat currentDepthMap;
     cv::Mat currentColorMap;
     Eigen::Matrix4f currentTrajectory;
 
-    // Camera intrinsics
-    Eigen::Matrix3f depthIntrinsics;
-    Eigen::Matrix3f colorIntrinsics;
-
-    unsigned int depthImageWidth{};
-    unsigned int depthImageHeight{};
-    unsigned int colorImageWidth{};
-    unsigned int colorImageHeight{};
-
-    // Camera extrinsics
-    Eigen::Matrix4f depthExtrinsics;
-    Eigen::Matrix4f colorExtrinsics;
+    // Camera specifications
+    CameraSpecifications cameraSpecifications;
 
     // Paths to the files and their timestamps
     fs::path baseDirectory;
@@ -241,8 +202,6 @@ private:
     std::vector<std::string> filenamesColorImages;
     std::vector<double> colorImagesTimeStamps;
 
-    std::vector<Eigen::Matrix4f> trajectory;
-    std::vector<double> trajectoryTimeStamps;
-
-
+    // Timestamp-trajectory pairs
+    std::vector<std::pair<double, Eigen::Matrix4f>> trajectory;
 };

@@ -14,9 +14,9 @@ void bilateralFilter(
         const float sigma_s, const float sigma_r
 ) {
 
-    CV_Assert(depthMap.type() == CV_32FC1);
-    CV_Assert(denoisedDepthMap.type() == CV_32FC1);
-    CV_Assert(depthMap.size() == denoisedDepthMap.size());
+    CV_DbgAssert(depthMap.type() == CV_32FC1);
+    CV_DbgAssert(denoisedDepthMap.type() == CV_32FC1);
+    CV_DbgAssert(depthMap.size() == denoisedDepthMap.size());
 
     const int imageHeight = depthMap.rows;
     const int imageWidth = depthMap.cols;
