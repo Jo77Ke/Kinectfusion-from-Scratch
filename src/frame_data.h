@@ -169,9 +169,10 @@ public:
                      vertexMap.isContinuous());
         CV_DbgAssert(vertexMap.total() * vertexMap.elemSize() == nVertices * sizeof(Vertex));
 
-        // Get number of faces
+        // Compute faces
         const float squaredEdgeThreshold = TRIANGULATION_EDGE_THRESHOLD * TRIANGULATION_EDGE_THRESHOLD;
-        std::vector<std::tuple<unsigned int, unsigned int, unsigned int>> faces;
+        std::vector<std::tuple<unsigned int, unsigned int, unsigned int>> faces((imageWidth - 1) * (imageHeight - 1) * 2);
+        size_t nFaces = 0;
         for (int v = 0; v < imageHeight - 1; ++v) {
             const auto *verticesRow = reinterpret_cast<const Vertex *>(vertexMap.ptr(v));
             const auto *verticesRowBelow = reinterpret_cast<const Vertex *>(vertexMap.ptr(v + 1));
@@ -204,7 +205,7 @@ public:
                     && (a.position - d.position).squaredNorm() < squaredEdgeThreshold
                     && (b.position - d.position).squaredNorm() < squaredEdgeThreshold) {
                     unsigned int idxB = u + 1 + v * imageWidth;
-                    faces.emplace_back(idxA, idxB, idxD);
+                    faces[nFaces++] = {idxA, idxB, idxD};
                 }
 
                 // Check triangle ACD
@@ -213,12 +214,10 @@ public:
                     && (a.position - d.position).squaredNorm() < squaredEdgeThreshold
                     && (c.position - d.position).squaredNorm() < squaredEdgeThreshold) {
                     unsigned int idxC = u + (v + 1) * imageWidth;
-                    faces.emplace_back(idxA, idxC, idxD);
+                    faces[nFaces++] = {idxA, idxC, idxD};
                 }
             }
         }
-        unsigned nFaces = faces.size();
-
 
         // Write off file
         std::ofstream outFile(filename);
@@ -244,7 +243,8 @@ public:
         }
 
         // save faces
-        for (const auto &face: faces) {
+        for (size_t i = 0; i < nFaces; ++i) {
+            const auto face = faces[i];
             outFile << "3 "
                     << std::get<0>(face) << " "
                     << std::get<1>(face) << " "

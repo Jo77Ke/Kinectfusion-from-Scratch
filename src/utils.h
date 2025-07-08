@@ -2,6 +2,7 @@
 
 #include <opencv2/core.hpp>
 #include <Eigen/Core>
+#include <Eigen/Geometry>
 #include <Eigen/StdVector>
 
 typedef Eigen::Matrix<unsigned char, 4, 1> Vector4uc;
