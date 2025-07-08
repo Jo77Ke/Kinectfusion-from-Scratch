@@ -1,11 +1,13 @@
 #include <iostream>
 #include <fstream>
 
-#include "Eigen.h"
-#include "VirtualSensor.h"
-#include "BilateralFilter.h"
+#include <Eigen/Geometry>
 
-#define BILATERAL_FILTERING true
+#include "utils.h"
+#include "rgbd_frame_stream.h"
+#include "bilateral_filter.h"
+
+#define BILATERAL_FILTERING false
 
 struct Vertex {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -13,23 +15,30 @@ struct Vertex {
     // position stored as 4 floats (4th component is supposed to be 1.0)
     Vector4f position;
 
-    // normals stored as 4 floats (4th component is supposed to be 1.0)
-    Vector4f normals;
-
-    // color stored as 4 unsigned char
-    Vector4uc color;
+    // color stored as 4 unsigned char (RGBX)
+    cv::Vec4b color;
 };
 
-bool WriteMesh(Vertex *vertices, unsigned int width, unsigned int height, const std::string &filename) {
+bool writeMesh(
+        const cv::Mat &vertexMap,
+        const std::string &filename
+) {
+    CV_Assert(vertexMap.type() == CV_8UC(sizeof(Vertex)));
+
     float edgeThreshold = 0.01f; // 1cm
 
     // Get number of vertices
-    unsigned int nVertices = width * height;
+    const int imageHeight = vertexMap.rows;
+    const int imageWidth = vertexMap.cols;
+    const unsigned int nVertices = imageWidth * imageHeight;
 
     // Get number of faces
     std::vector<std::tuple<unsigned int, unsigned int, unsigned int>> faces;
-    for (int u = 0; u < width - 1; ++u) {
-        for (int v = 0; v < height - 1; ++v) {
+    for (int v = 0; v < imageHeight - 1; ++v) {
+        const auto *verticesRow = reinterpret_cast<const Vertex *>(vertexMap.ptr(v));
+        const auto *verticesRowBelow = reinterpret_cast<const Vertex *>(vertexMap.ptr(v + 1));
+
+        for (int u = 0; u < imageWidth - 1; ++u) {
             /*
              * Simple neighborhood-based triangulation:
              *
@@ -39,15 +48,15 @@ bool WriteMesh(Vertex *vertices, unsigned int width, unsigned int height, const 
              *
              * Only write triangles with valid vertices and an edge length smaller than the threshold.
              */
-            unsigned int idxA = u + v * width;
-            unsigned int idxB = u + 1 + v * width;
-            unsigned int idxC = u + (v + 1) * width;
-            unsigned int idxD = u + 1 + (v + 1) * width;
+            unsigned int idxA = u + v * imageWidth;
+            unsigned int idxB = u + 1 + v * imageWidth;
+            unsigned int idxC = u + (v + 1) * imageWidth;
+            unsigned int idxD = u + 1 + (v + 1) * imageWidth;
 
-            Vertex a = vertices[idxA];
-            Vertex b = vertices[idxB];
-            Vertex c = vertices[idxC];
-            Vertex d = vertices[idxD];
+            Vertex a = verticesRow[u];
+            Vertex b = verticesRow[u+1];
+            Vertex c = verticesRowBelow[u];
+            Vertex d = verticesRowBelow[u+1];
 
             if (a.position.x() == MINF || d.position.x() == MINF) {
                 continue;
@@ -80,8 +89,10 @@ bool WriteMesh(Vertex *vertices, unsigned int width, unsigned int height, const 
     outFile << nVertices << " " << nFaces << " 0" << std::endl;
 
     // save vertices
-    for (int idx = 0; idx < nVertices; ++idx) {
-        Vertex v = vertices[idx];
+    // Iterate over all vertices in vertexMap without using u, v
+    auto* vertex = reinterpret_cast<Vertex *>(vertexMap.data);
+    for (int i = 0; i < nVertices; ++i, ++vertex) {
+        Vertex& v = *vertex;
         if (v.position.x() != MINF) {
             outFile << v.position.x() << " " << v.position.y() << " " << v.position.z()
                     << " " << static_cast<int>(v.color(0))
@@ -109,119 +120,129 @@ bool WriteMesh(Vertex *vertices, unsigned int width, unsigned int height, const 
     return true;
 }
 
-void computeNormals(Vertex *const vertexMap, const unsigned int imageWidth, const unsigned int imageHeight) {
-    for (unsigned int v = 0; v < imageHeight; ++v) {
-        for (unsigned int u = 0; u < imageWidth; ++u) {
-            const unsigned int idx = u + v * imageWidth;
+bool computeNormals(const cv::Mat &vertexMap, cv::Mat &normalMap) {
+    CV_Assert(vertexMap.type() == CV_8UC(sizeof(Vertex)));
+    CV_Assert(normalMap.type() == CV_32FC4);
+    CV_Assert(vertexMap.size() == normalMap.size());
 
-            // check if u+1, v+1 are in the image
-            if (u < imageWidth - 1 && v < imageHeight - 1) {
-                const unsigned int idxRight = (u + 1) + v * idx+1;
-                const unsigned int idxDown  = u + (v + 1) * imageHeight;
+    const int imageHeight = vertexMap.rows;
+    const int imageWidth = vertexMap.cols;
 
-                const Vector4f& p     = vertexMap[idx].position;
-                const Vector4f& pRight = vertexMap[idxRight].position;
-                const Vector4f& pDown  = vertexMap[idxDown].position;
+    for (int v = 0; v < imageHeight - 1; ++v) {
+        const auto *vertexRow = vertexMap.ptr<cv::Vec4f>(v);
+        const auto *vertexRowBelow = vertexMap.ptr<cv::Vec4f>(v);
+        auto *normalRow = normalMap.ptr<cv::Vec4f>(v);
+        for (int u = 0; u < imageWidth - 1; ++u) {
+            const Eigen::Vector4f vertex(
+                    vertexRow[u][0],
+                    vertexRow[u][1],
+                    vertexRow[u][2],
+                    vertexRow[u][3]
+            );
+            const Eigen::Vector4f vertexRight(
+                    vertexRow[u + 1][0],
+                    vertexRow[u + 1][1],
+                    vertexRow[u + 1][2],
+                    vertexRow[u + 1][3]
+            );
+            const Eigen::Vector4f vertexBelow(
+                    vertexRowBelow[u][0],
+                    vertexRowBelow[u][1],
+                    vertexRowBelow[u][2],
+                    vertexRowBelow[u][3]
+            );
 
-                // check for MINF
-                if (p.x() != MINF && pRight.x() != MINF && pDown.x() != MINF) {
-                    // du = V(u+1, v) - V(u,v), dv = V(u, v+1) - V(u,v)
-                    Vector3f du = pRight.head<3>() - p.head<3>();
-                    Vector3f dv = pDown.head<3>() - p.head<3>();
+            // check for invalid points
+            if (vertex.x() != MINF && vertexRight.x() != MINF && vertexBelow.x() != MINF) {
+                // du = V(u+1, v) - V(u,v), dv = V(u, v+1) - V(u,v)
+                Vector3f du = vertexRight.head<3>() - vertex.head<3>();
+                Vector3f dv = vertexBelow.head<3>() - vertex.head<3>();
 
-                    vertexMap[idx].normals = du.cross(dv).normalized().homogeneous();
-                } else {
-                    // at least one point invalid -> normal vector invalid
-                    vertexMap[idx].normals = Vector4f(MINF, MINF, MINF, MINF);
-                }
+                Vector3f n = du.cross(dv).normalized();
+                normalRow[u] = cv::Vec4f(n.x(), n.y(), n.z(), 1.0f);
             } else {
-                // neighbours dont exist -> invalid
-                vertexMap[idx].normals = Vector4f(MINF, MINF, MINF, MINF);
+                // at least one point invalid -> normal vector invalid
+                normalRow[u] = cv::Vec4f(MINF, MINF, MINF, MINF);
             }
         }
     }
+
+    return true;
 }
 
 int main() {
     std::string filenameIn = "./data/rgbd_dataset_freiburg1_xyz/";
     std::string outputDirectory = "./results/";
-    std::string filenameBaseOut = BILATERAL_FILTERING ? "smoothMesh_" : "mesh_";
+    std::string filenameBaseOut = "mesh_";
 
     // load video
-    std::cout << "Initialize virtual sensor..." << std::endl;
-    VirtualSensor sensor;
-    if (!sensor.Init(filenameIn)) {
-        std::cout << "Failed to initialize the sensor!\nCheck file path!" << std::endl;
+    std::cout << "Initialize frame stream..." << std::endl;
+    RGBDFrameStream stream;
+    if (!stream.init(filenameIn)) {
+        std::cerr << "Failed to initialize the frame stream!" << std::endl;
         return -1;
     }
 
     // convert video to meshes
-    while (sensor.ProcessNextFrame()) {
-        const auto imageWidth = sensor.GetDepthImageWidth();
-        const auto imageHeight = sensor.GetDepthImageHeight();
+    while (stream.processNextFrame()) {
+        const int imageWidth = static_cast<int>(stream.getDepthImageWidth());
+        const int imageHeight = static_cast<int>(stream.getDepthImageHeight());
 
-        // get ptr to the current depth frame
-        // depth is stored in row major (get dimensions via sensor.GetDepthImageWidth() / GetDepthImageHeight())
-        float *depthMap = sensor.GetDepth();
+        // get depth map of current frame
+        const cv::Mat &depthMap = stream.getCurrentDepthMap();
 
-        float filteredDepthMap[imageWidth * imageHeight];
+        cv::Mat denoisedDepthMap = cv::Mat(imageHeight, imageWidth, CV_32F);;
         if (BILATERAL_FILTERING) {
-            const int sigma_s = 8; // controls filter region: the larger -> the more distant pixels contribute -> more smoothing
-            const int sigma_r = 25; // controls allowed depth difference: the larger -> smooths higher contrasts -> edges may be blurred
-            bilateralFilter(depthMap, imageWidth, imageHeight, filteredDepthMap, sigma_s, sigma_r);
+            const float sigma_s = 3; // controls filter region: the larger -> the more distant pixels contribute -> more smoothing
+            const float sigma_r = 0.1; // controls allowed depth difference: the larger -> smooths higher contrasts -> edges may be blurred
+
+            bilateralFilter(depthMap, denoisedDepthMap, sigma_s, sigma_r);
+            filenameBaseOut = "smoothedMesh_s" + std::to_string(sigma_s) + "_r" + std::to_string(sigma_r) + "_";
         }
 
-        // get ptr to the current color frame
-        // color is stored as RGBX in row major (4 byte values per pixel, get dimensions via sensor.GetColorImageWidth() / GetColorImageHeight())
-        BYTE *colorMap = sensor.GetColorRGBX();
+        // get color map of current frame (stored as RGBX)
+        const cv::Mat &colorMap = stream.getCurrentColorMap();
 
         // get depth intrinsics
-        Matrix3f depthIntrinsics = sensor.GetDepthIntrinsics();
-
-        // compute inverse depth extrinsics
-        Matrix4f depthExtrinsicsInv = sensor.GetDepthExtrinsics().inverse();
-
-        Matrix4f trajectory = sensor.GetTrajectory();
-        Matrix4f trajectoryInv = sensor.GetTrajectory().inverse();
-
-        Vertex *vertices = new Vertex[sensor.GetDepthImageWidth() * sensor.GetDepthImageHeight()];
-
+        const Matrix3f &depthIntrinsics = stream.getDepthIntrinsics();
         Matrix3f depthIntrinsicsInv = depthIntrinsics.inverse();
 
-        for (int u = 0; u < imageWidth; ++u) {
-            for (int v = 0; v < imageHeight; ++v) {
-                const auto idx = u + v * imageWidth;
-                float depthValue = BILATERAL_FILTERING ? filteredDepthMap[idx] : depthMap[idx];
+        // compute inverse depth extrinsics
+        Matrix4f depthExtrinsicsInv = stream.getDepthExtrinsics().inverse();
+        Matrix4f trajectoryInv = stream.getCurrentTrajectory().inverse();
+
+        cv::Mat vertexMap(imageHeight, imageWidth, CV_8UC(sizeof(Vertex)), cv::Mat::AUTO_STEP);
+        for (int v = 0; v < imageHeight; ++v) {
+            const auto *depthRow = BILATERAL_FILTERING ? denoisedDepthMap.ptr<float>(v) : depthMap.ptr<float>(v);
+            const auto *colorRow = colorMap.ptr<cv::Vec4b>(v);
+            auto *vertexRow = reinterpret_cast<Vertex *>(vertexMap.ptr(v));
+            for (int u = 0; u < imageWidth; ++u) {
+                float depthValue = depthRow[u];
+                Vertex &vertex = vertexRow[u];
+
                 if (depthValue == MINF) { // invalid depth value -> invalid vertex
-                    vertices[idx].position = Vector4f(MINF, MINF, MINF, MINF);
-                    vertices[idx].color = Vector4uc(0, 0, 0, 0);
+                    vertex.position = Vector4f(MINF, MINF, MINF, MINF);
+                    vertex.color = cv::Vec4b(0, 0, 0, 0);
                 } else {
                     Vector3f posInCameraSpace = depthIntrinsicsInv * depthValue
                                                 * Vector3f(static_cast<float>(u), static_cast<float>(v), 1.0f);
-                    vertices[idx].position = trajectoryInv * depthExtrinsicsInv * posInCameraSpace.homogeneous();
-                    vertices[idx].color = Vector4uc(
-                            colorMap[4 * idx],
-                            colorMap[4 * idx + 1],
-                            colorMap[4 * idx + 2],
-                            colorMap[4 * idx + 3]
-                    );
+                    vertex.position = trajectoryInv * depthExtrinsicsInv * posInCameraSpace.homogeneous();
+
+                    vertex.color = colorRow[u];
                 }
             }
         }
 
-        computeNormals(vertices, imageWidth, imageHeight);
+        cv::Mat normalMap(imageHeight, imageWidth, CV_32FC4);
+        computeNormals(vertexMap, normalMap);
 
-        // write mesh file
+        // Write mesh file
         std::stringstream ss;
-        ss << outputDirectory << filenameBaseOut << sensor.GetCurrentFrameCnt() << ".off";
-        if (!WriteMesh(vertices, sensor.GetDepthImageWidth(), sensor.GetDepthImageHeight(), ss.str())) {
-            std::cout << "Failed to write mesh!\nCheck file path!" << std::endl;
+        ss << outputDirectory << filenameBaseOut << stream.getCurrentFrameIndex() << ".off";
+        if (!writeMesh(vertexMap, ss.str())) {
+            std::cerr << "Failed to write mesh!" << std::endl;
             return -1;
         }
-
-
-        // free mem
-        delete[] vertices;
     }
 
     return 0;

@@ -1,32 +1,26 @@
 cmake_minimum_required(VERSION 3.22.1)
-project(kinectfusion)
+project(kinect_fusion)
 
-set(CMAKE_CXX_STANDARD 11)
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR})
-
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR})
 
 find_package(Eigen3 REQUIRED)
-
-find_path(FREEIMAGE_INCLUDE_DIR NAMES FreeImage.h)
-find_library(FREEIMAGE_LIBRARY NAMES freeimage)
+find_package(OpenCV REQUIRED)
 
 add_executable(${PROJECT_NAME}
-        "libs/Eigen.h"
-        "libs/FreeImageHelper.cpp"
         "src/main.cpp"
-        "src/VirtualSensor.h"
-        "src/BilateralFilter.h"
+        "src/bilateral_filter.h"
+        "src/rgbd_frame_stream.h"
+        "src/utils.h"
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
         ${EIGEN3_INCLUDE_DIRS}
-        ${FREEIMAGE_INCLUDE_DIR}
-        ${PROJECT_SOURCE_DIR}/libs
+        ${OpenCV_INCLUDE_DIRS}
 )
 
 target_link_libraries(${PROJECT_NAME}
         Eigen3::Eigen
-        ${FREEIMAGE_LIBRARY}
+        ${OpenCV_LIBS}
 )
 
