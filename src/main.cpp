@@ -129,7 +129,7 @@ void computeNormals(Vertex *const vertexMap, const unsigned int imageWidth, cons
                     Vector3f du = pRight.head<3>() - p.head<3>();
                     Vector3f dv = pDown.head<3>() - p.head<3>();
 
-                    vertexMap[idx].normals = du.cross(dv).normalized();
+                    vertexMap[idx].normals = du.cross(dv).normalized().homogeneous();
                 } else {
                     // at least one point invalid -> normal vector invalid
                     vertexMap[idx].normals = Vector4f(MINF, MINF, MINF, MINF);
