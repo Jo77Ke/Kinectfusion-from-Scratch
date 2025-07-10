@@ -6,6 +6,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR})
 
 find_package(Eigen3 REQUIRED)
 find_package(OpenCV REQUIRED)
+find_package(OpenMP REQUIRED)
 
 add_executable(${PROJECT_NAME}
         "src/main.cpp"
@@ -23,5 +24,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 target_link_libraries(${PROJECT_NAME}
         Eigen3::Eigen
         ${OpenCV_LIBS}
+        OpenMP::OpenMP_CXX
 )
 
+target_compile_definitions(${PROJECT_NAME} PRIVATE _USE_OPENMP)

@@ -3,6 +3,7 @@
 #include <Eigen/Geometry>
 #include <utility>
 #include <fstream>
+#include <numeric>
 
 #include "utils.h"
 #include "bilateral_filter.h"
@@ -88,10 +89,12 @@ public:
 
     void computeVertexMap() {
         vertexMap = cv::Mat(imageHeight, imageWidth, CV_8UC(sizeof(Vertex)), cv::Mat::AUTO_STEP);
+
+#pragma omp parallel for schedule(dynamic)
         for (int v = 0; v < imageHeight; ++v) {
-            const auto *depthRow = depthMap.ptr<float>(v);
-            const auto *colorRow = colorMap.ptr<cv::Vec4b>(v);
-            auto *vertexRow = reinterpret_cast<Vertex *>(vertexMap.ptr(v));
+            const float *depthRow = depthMap.ptr<float>(v);
+            const cv::Vec4b *colorRow = colorMap.ptr<cv::Vec4b>(v);
+            Vertex *vertexRow = reinterpret_cast<Vertex *>(vertexMap.ptr(v));
             for (int u = 0; u < imageWidth; ++u) {
                 float depthValue = depthRow[u];
                 Vertex &vertex = vertexRow[u];
@@ -118,10 +121,11 @@ public:
         CV_DbgAssert(vertexMap.type() == CV_8UC(sizeof(Vertex)));
         CV_DbgAssert(vertexMap.size() == normalMap.size());
 
+#pragma omp parallel for schedule(dynamic)
         for (int v = 0; v < imageHeight - 1; ++v) {
-            const auto *vertexRow = vertexMap.ptr<cv::Vec4f>(v);
-            const auto *vertexRowBelow = vertexMap.ptr<cv::Vec4f>(v);
-            auto *normalRow = normalMap.ptr<cv::Vec4f>(v);
+            const cv::Vec4f *vertexRow = vertexMap.ptr<cv::Vec4f>(v);
+            const cv::Vec4f *vertexRowBelow = vertexMap.ptr<cv::Vec4f>(v);
+            cv::Vec4f *normalRow = normalMap.ptr<cv::Vec4f>(v);
             for (int u = 0; u < imageWidth - 1; ++u) {
                 const Eigen::Vector4f vertex(
                         vertexRow[u][0],
@@ -171,52 +175,37 @@ public:
 
         // Compute faces
         const float squaredEdgeThreshold = TRIANGULATION_EDGE_THRESHOLD * TRIANGULATION_EDGE_THRESHOLD;
-        std::vector<std::tuple<unsigned int, unsigned int, unsigned int>> faces((imageWidth - 1) * (imageHeight - 1) * 2);
+
+        std::vector<std::tuple<unsigned int, unsigned int, unsigned int>> faces;
         size_t nFaces = 0;
-        for (int v = 0; v < imageHeight - 1; ++v) {
-            const auto *verticesRow = reinterpret_cast<const Vertex *>(vertexMap.ptr(v));
-            const auto *verticesRowBelow = reinterpret_cast<const Vertex *>(vertexMap.ptr(v + 1));
 
-            for (int u = 0; u < imageWidth - 1; ++u) {
-                /*
-                 * Simple neighborhood-based triangulation:
-                 *
-                 * a - b
-                 * | \ |
-                 * c - d
-                 *
-                 * Only write triangles with valid vertices and an edge length smaller than the threshold.
-                 */
-                const Vertex &a = verticesRow[u];
-                const Vertex &b = verticesRow[u + 1];
-                const Vertex &c = verticesRowBelow[u];
-                const Vertex &d = verticesRowBelow[u + 1];
+        // Share work among threads by dividing the image into horizontal strips
+        std::vector<std::vector<std::tuple<unsigned int, unsigned int, unsigned int>>> threadFaces(omp_get_max_threads());
+        std::vector<size_t> threadCounts(omp_get_max_threads(), 0);
 
-                if (a.position.x() == MINF || d.position.x() == MINF) {
-                    continue;
-                }
+#pragma omp parallel
+        {
+            const int threadID = omp_get_thread_num();
+            const int numberOfRows = imageHeight - 1;
+            const int chunkSize = (numberOfRows + omp_get_num_threads() - 1) / omp_get_num_threads();
+            const int startRow = std::min(threadID * chunkSize, numberOfRows);
+            const int endRow = std::min((threadID + 1) * chunkSize, numberOfRows);
 
-                unsigned int idxA = u + v * imageWidth;
-                unsigned int idxD = u + 1 + (v + 1) * imageWidth;
+            threadFaces[threadID].resize(2 * (imageWidth - 1) * (endRow - startRow));
+            size_t localCount = 0;
 
-                // Check triangle ABD
-                if (b.position.x() != MINF
-                    && (a.position - b.position).squaredNorm() < squaredEdgeThreshold
-                    && (a.position - d.position).squaredNorm() < squaredEdgeThreshold
-                    && (b.position - d.position).squaredNorm() < squaredEdgeThreshold) {
-                    unsigned int idxB = u + 1 + v * imageWidth;
-                    faces[nFaces++] = {idxA, idxB, idxD};
-                }
+            computeFacesForRegion(startRow, endRow, squaredEdgeThreshold,
+                                  threadFaces[threadID], localCount);
 
-                // Check triangle ACD
-                if (c.position.x() != MINF
-                    && (a.position - c.position).squaredNorm() < squaredEdgeThreshold
-                    && (a.position - d.position).squaredNorm() < squaredEdgeThreshold
-                    && (c.position - d.position).squaredNorm() < squaredEdgeThreshold) {
-                    unsigned int idxC = u + (v + 1) * imageWidth;
-                    faces[nFaces++] = {idxA, idxC, idxD};
-                }
-            }
+            threadCounts[threadID] = localCount;
+            threadFaces[threadID].resize(localCount);
+        }
+
+        // Combine results from all threads
+        nFaces = std::accumulate(threadCounts.begin(), threadCounts.end(), size_t(0));
+        faces.reserve(nFaces);
+        for (auto& tf : threadFaces) {
+            faces.insert(faces.end(), tf.begin(), tf.end());
         }
 
         // Write off file
@@ -242,7 +231,7 @@ public:
             }
         }
 
-        // save faces
+        // Save faces
         for (size_t i = 0; i < nFaces; ++i) {
             const auto face = faces[i];
             outFile << "3 "
@@ -251,11 +240,49 @@ public:
                     << std::get<2>(face) << "\n";
         }
 
-        // close file
         outFile.close();
     }
 
 private:
+    void computeFacesForRegion(
+            int startRow, int endRow,
+            float squaredEdgeThreshold,
+            std::vector<std::tuple<unsigned int, unsigned int, unsigned int>>& faces,
+            size_t& faceCount)
+    {
+        for (int v = startRow; v < endRow; ++v) {
+            const auto* verticesRow = reinterpret_cast<const Vertex*>(vertexMap.ptr(v));
+            const auto* verticesRowBelow = reinterpret_cast<const Vertex*>(vertexMap.ptr(v + 1));
+
+            for (int u = 0; u < imageWidth - 1; ++u) {
+                const Vertex& a = verticesRow[u];
+                const Vertex& d = verticesRowBelow[u + 1];
+                if (a.position.x() == MINF || d.position.x() == MINF) continue;
+
+                unsigned int idxA = u + v * imageWidth;
+                unsigned int idxD = u + 1 + (v + 1) * imageWidth;
+                const Vertex& b = verticesRow[u + 1];
+                const Vertex& c = verticesRowBelow[u];
+
+                // Triangle ABD
+                if (b.position.x() != MINF
+                    && (a.position - b.position).squaredNorm() < squaredEdgeThreshold
+                    && (a.position - d.position).squaredNorm() < squaredEdgeThreshold
+                    && (b.position - d.position).squaredNorm() < squaredEdgeThreshold) {
+                    faces[faceCount++] = {idxA, u + 1 + v * imageWidth, idxD};
+                }
+
+                // Triangle ACD
+                if (c.position.x() != MINF
+                    && (a.position - c.position).squaredNorm() < squaredEdgeThreshold
+                    && (a.position - d.position).squaredNorm() < squaredEdgeThreshold
+                    && (c.position - d.position).squaredNorm() < squaredEdgeThreshold) {
+                    faces[faceCount++] = {idxA, u + (v + 1) * imageWidth, idxD};
+                }
+            }
+        }
+    }
+
     int frameNumber{};
     CameraSpecifications cameraSpecs;
     int imageWidth{};

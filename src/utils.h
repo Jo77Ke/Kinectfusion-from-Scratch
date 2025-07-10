@@ -1,5 +1,6 @@
 #pragma once
 
+#include <omp.h>
 #include <opencv2/core.hpp>
 #include <Eigen/Core>
 #include <Eigen/Geometry>
