@@ -6,6 +6,13 @@
     sudo git apt update && suod apt upgrade && sudo apt install -qq libeigen3-dev lib-opencv-dev
 ```
 
+## Setting environment variables to configure OpenMP parallelization
+
+```bash
+    export OMP_NUM_THREADS=<N_THREADS>;OMP_PROC_BIND=true;OMP_PLACES=cores
+```
+Replace `<N_THREADS>` with the number of threads you want to use.
+
 ## Checklist
 
 ### Input
