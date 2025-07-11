@@ -3,7 +3,7 @@
 ## Installation
 
 ```bash
-    sudo git apt update && suod apt upgrade && sudo apt install -qq libeigen3-dev lib-opencv-dev
+    sudo apt update -qq -y && sudo apt upgrade -qq -y && sudo apt install -qq -y build-essentials libeigen3-dev libopencv-dev
 ```
 
 ## Setting environment variables to configure OpenMP parallelization
