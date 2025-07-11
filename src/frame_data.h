@@ -10,6 +10,8 @@
 
 constexpr float TRIANGULATION_EDGE_THRESHOLD = 0.01f; // 1cm
 
+constexpr float TRUNCATION_RADIUS = 0.05f; // 5cm
+
 struct CameraSpecifications {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
@@ -243,6 +245,51 @@ public:
         outFile.close();
     }
 
+    void computeCameraCenterInGlobalSpace() {
+        cameraCenterInGlobalSpace = (trajectory.inverse() * cameraSpecs.extrinsicsInverse).col(3).head<3>();
+    }
+
+    float tsdfValueAt(const Vector3f& globalPoint) const {
+        const Vector3f pointInCameraSpace = (cameraSpecs.extrinsics * trajectory).topLeftCorner<3, 4>() * globalPoint.homogeneous();
+
+        Vector3f projectedPoint = cameraSpecs.intrinsics * pointInCameraSpace;
+        projectedPoint /= projectedPoint.z();
+
+        // Check if within image bounds
+        if (projectedPoint.x() < 0 || projectedPoint.x() >= static_cast<float>(imageWidth) ||
+            projectedPoint.y() < 0 || projectedPoint.y() >= static_cast<float>(imageHeight)) {
+            return MINF;
+        }
+
+        const Vector3i pixel = projectedPoint.cast<int>(); // Nearest neighbor projection via rounding down
+
+        const float depthValue = depthMap.at<float>(pixel.y(), pixel.x());
+        // Check if depth value is valid
+        if (depthValue == MINF) {
+            return MINF;
+        }
+
+        const float normalizationFactor = (cameraSpecs.intrinsicsInverse * pixel.cast<float>()).norm();
+        // Check if normalization factor is valid
+        if (normalizationFactor == 0.0f) {
+            return MINF;
+        }
+
+        const float rayDepth = (cameraCenterInGlobalSpace - globalPoint).norm() / normalizationFactor;
+        // Check if ray depth is valid
+        if (rayDepth < 0.0f) {
+            return MINF;
+        }
+
+        const float deltaDepth = rayDepth - depthValue;
+        // Truncate points that are too far away
+        if (deltaDepth < -TRUNCATION_RADIUS) {
+            return MINF;
+        }
+
+        return std::min(1.0f, deltaDepth / TRUNCATION_RADIUS) * static_cast<float>(sgn(deltaDepth));
+    }
+
 private:
     void computeFacesForRegion(
             int startRow, int endRow,
@@ -292,4 +339,5 @@ private:
     Eigen::Matrix4f trajectory;
     cv::Mat vertexMap;
     cv::Mat normalMap;
+    Vector3f cameraCenterInGlobalSpace;
 };

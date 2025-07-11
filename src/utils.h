@@ -20,3 +20,7 @@ EIGEN_DEFINE_STL_VECTOR_SPECIALIZATION(Eigen::MatrixXf)
 EIGEN_DEFINE_STL_VECTOR_SPECIALIZATION(Eigen::Quaternionf)
 
 #define MINF (-std::numeric_limits<float>::infinity())
+
+constexpr int sgn(float val) noexcept {
+    return (0.0f < val) - (val < 0.0f);
+}

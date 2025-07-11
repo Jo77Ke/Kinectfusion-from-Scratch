@@ -38,10 +38,11 @@ int main() {
         frameData.computeVertexMap();
         frameData.computeNormalMap();
 
+        frameData.computeCameraCenterInGlobalSpace();
+
         std::stringstream ss;
         ss << outputDirectory << filenameBaseOut << stream.getCurrentFrameIndex() << ".off";
         frameData.writeMesh(ss.str());
-
     }
 
     return 0;
