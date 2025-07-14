@@ -14,7 +14,8 @@ add_executable(${PROJECT_NAME}
         "src/rgbd_frame_stream.h"
         "src/frame_data.h"
         "src/bilateral_filter.h"
-        src/model.h
+        "src/model.h"
+        "src/pose_estimation.h"
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
