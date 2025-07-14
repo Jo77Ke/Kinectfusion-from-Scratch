@@ -1,5 +1,7 @@
 #pragma once
-#include <Eigen/Dense>
+
+#include "utils.h"
+#include "frame_data.h"
 #include <vector>
 #include <cmath>
 
@@ -14,38 +16,41 @@ public:
     float voxelSize;
     int dimX, dimY, dimZ;
 
-    TSDFVoxel getInterpolatedVoxel(const Eigen::Vector3f& pos) const {
+    TSDFVoxel getInterpolatedVoxel(const Eigen::Vector3f &pos) const {
         // Dummy: hier sollte trilineare Interpolation passieren
         return {0.0f, 1.0f};
     }
 
-    bool inBounds(const Eigen::Vector3f& pos) const {
-        // Dummy: prüft ob Punkt im Volumen liegt
-        return true;
+    bool isInBounds(const Eigen::Vector3f &pos) const {
+        return (pos.x() >= volumeOrigin.x() && pos.x() < volumeOrigin.x() + (float) dimX * voxelSize &&
+                pos.y() >= volumeOrigin.y() && pos.y() < volumeOrigin.y() + (float) dimY * voxelSize &&
+                pos.z() >= volumeOrigin.z() && pos.z() < volumeOrigin.z() + (float) dimZ * voxelSize);
     }
 };
 
-class SurfaceRaycaster {
+class SurfaceRayCaster {
 public:
-    SurfaceRaycaster(const TSDFVolume& volume,
-                     const Eigen::Matrix3f& K,
-                     const Eigen::Matrix4f& Tcw,
-                     int width, int height,
-                     float mu)
-        : tsdf(volume), K(K), Tcw(Tcw), width(width), height(height), mu(mu) {}
+    SurfaceRayCaster(
+            const TSDFVolume &volume,
+            const Eigen::Matrix3f &K,
+            const Eigen::Matrix4f &Tcw,
+            int width, int height,
+            float mu
+    ) : tsdf(volume), K(K), Tcw(Tcw), width(width), height(height), mu(mu) {}
 
-    void raycast(std::vector<Eigen::Vector3f>& vertexMap,
-                 std::vector<Eigen::Vector3f>& normalMap)
-    {
+    void castRay(
+            std::vector<Eigen::Vector3f> &vertexMap,
+            std::vector<Eigen::Vector3f> &normalMap
+    ) {
         vertexMap.resize(width * height, Eigen::Vector3f::Zero());
         normalMap.resize(width * height, Eigen::Vector3f::Zero());
 
-        Eigen::Matrix3f Rcw = Tcw.block<3,3>(0,0);
-        Eigen::Vector3f tcw = Tcw.block<3,1>(0,3);
+        Eigen::Matrix3f Rcw = Tcw.block<3, 3>(0, 0);
+        Eigen::Vector3f tcw = Tcw.block<3, 1>(0, 3);
 
         for (int v = 0; v < height; ++v) {
             for (int u = 0; u < width; ++u) {
-                Eigen::Vector3f pixel((float)u, (float)v, 1.0f);
+                Eigen::Vector3f pixel((float) u, (float) v, 1.0f);
                 Eigen::Vector3f rayDir = K.inverse() * pixel;
                 rayDir.normalize();
 
@@ -53,45 +58,65 @@ public:
                 Eigen::Vector3f dir = Rcw * rayDir;
 
                 Eigen::Vector3f point;
+                int idx = v * width + u;
                 if (findSurfaceIntersection(origin, dir, point)) {
-                    int idx = v * width + u;
                     vertexMap[idx] = point;
                     normalMap[idx] = computeNormal(point);
+                } else {
+                    vertexMap[idx] = Vector3f(MINF, MINF, MINF);
+                    normalMap[idx] = Vector3f(MINF, MINF, MINF);
                 }
             }
         }
     }
 
 private:
-    const TSDFVolume& tsdf;
+    const TSDFVolume &tsdf;
     Eigen::Matrix3f K;
     Eigen::Matrix4f Tcw;
     int width, height;
     float mu;
 
-    bool findSurfaceIntersection(const Eigen::Vector3f& origin,
-                                 const Eigen::Vector3f& direction,
-                                 Eigen::Vector3f& surfacePoint)
-    {
-        float t = 0.5f;
-        float t_max = 3.0f;
-        float step = tsdf.voxelSize;
-        float prevSDF = 1.0f;
+    bool findSurfaceIntersection(const Eigen::Vector3f &origin,
+                                 const Eigen::Vector3f &direction,
+                                 Eigen::Vector3f &surfacePoint) {
+        float t = 0.4f;
+        float t_max = 8.0f;
+
+        Eigen::Vector3f p = origin + t * direction;
+        TSDFVoxel voxel = tsdf.getInterpolatedVoxel(p);
+
+        if (!tsdf.isInBounds(p)) { // Ray outside the volume bounds
+            return false;
+        }
+
+        float sdf = voxel.sdf;
+        float step = (sdf > mu) ? mu : std::max(sdf, tsdf.voxelSize);
+        t += step;
+        float prevSDF = sdf;
+
 
         while (t < t_max) {
-            Eigen::Vector3f p = origin + t * direction;
-            if (!tsdf.inBounds(p)) return false;
+            p = origin + t * direction;
+            voxel = tsdf.getInterpolatedVoxel(p);
+            sdf = voxel.sdf;
 
-            TSDFVoxel voxel = tsdf.getInterpolatedVoxel(p);
-            float sdf = voxel.sdf;
 
-            if (sdf < 0.0f && prevSDF > 0.0f) {
+            if (!tsdf.isInBounds(p)) { // Ray outside the volume bounds
+                return false;
+            }
+
+            if (prevSDF != MINF && prevSDF <= 0.0f && sdf >= 0.0f) { // Intersection from inside to outside the volume
+                return false;
+            }
+
+            if (sdf != MINF && sdf <= 0.0f && prevSDF >= 0.0f) {
                 float tInterp = t - step * prevSDF / (prevSDF - sdf);
                 surfacePoint = origin + tInterp * direction;
                 return true;
             }
 
-            step = (sdf > mu) ? mu : std::max(0.1f * sdf, tsdf.voxelSize);
+            step = (sdf > mu) ? mu : std::max(sdf, tsdf.voxelSize);
             t += step;
             prevSDF = sdf;
         }
@@ -99,8 +124,7 @@ private:
         return false;
     }
 
-    Eigen::Vector3f computeNormal(const Eigen::Vector3f& p)
-    {
+    Eigen::Vector3f computeNormal(const Eigen::Vector3f &p) {
         float delta = tsdf.voxelSize;
 
         Eigen::Vector3f dx(delta, 0, 0);

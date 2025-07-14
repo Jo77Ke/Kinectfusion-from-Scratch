@@ -23,6 +23,9 @@ struct CameraSpecifications {
     Matrix4f extrinsics;
     Matrix4f extrinsicsInverse;
 
+    float minDepthRange = 0.4f;
+    float maxDepthRange = 8.0f;
+
     CameraSpecifications() :
             imageWidth(0),
             imageHeight(0),
@@ -68,7 +71,6 @@ public:
         depthMap(std::move(depthMap)),
         colorMap(std::move(colorMap)),
         trajectory(trajectory) {
-        CV_DbgAssert(!this->depthMap.empty() && !this->colorMap.empty());
     }
 
     int getFrameNumber() const { return frameNumber; }
@@ -84,7 +86,7 @@ public:
     void applyBilateralFilter(
             const float sigma_s, const float sigma_r
     ) {
-        cv::Mat filteredDepthMap = cv::Mat(imageHeight, imageWidth, CV_32F);;
+        cv::Mat filteredDepthMap = cv::Mat(imageHeight, imageWidth, CV_32F);
         bilateralFilter(depthMap, filteredDepthMap, sigma_s, sigma_r);
         depthMap = std::move(filteredDepthMap);
     }
