@@ -26,11 +26,12 @@ Replace `<N_THREADS>` with the number of threads you want to use.
 ### Pre-processing (per frame)
 - [x] Apply a bilateral filter on the depth map to reduce noise
 - [x] Compute a normal map from the depth map
-- [ ] Implement sub-sampling (block averaging with depth values within $3\sigma_r$ of the central pixel)
+- [x] Implement sub-sampling (block averaging with depth values within $3\sigma_r$ of the central pixel)
 
 ### Volumetric Fusion
 - [x] Compute projective TSDF
-- [ ] Implement running average for incrementally adding a new frame
+- [x] Implement running average for incrementally adding a new frame
+- [ ] Implement VoxelHashing to reduce memory usage
 
 ### Surface Prediction
 - [x] Implement ray-casting
