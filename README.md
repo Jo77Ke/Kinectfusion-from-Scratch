@@ -29,11 +29,11 @@ Replace `<N_THREADS>` with the number of threads you want to use.
 - [ ] Implement sub-sampling (block averaging with depth values within $3\sigma_r$ of the central pixel)
 
 ### Volumetric Fusion
-- [ ] Compute projective TSDF
+- [x] Compute projective TSDF
 - [ ] Implement running average for incrementally adding a new frame
 
 ### Surface Prediction
-- [ ] Implement ray-casting
+- [x] Implement ray-casting
 
 ### Pose Estimation
 - [ ] Implement ICP
