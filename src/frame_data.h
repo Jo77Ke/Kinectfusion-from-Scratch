@@ -102,7 +102,7 @@ struct Vertex {
     Vector4f position;
 
     // color stored as 4 unsigned char (RGBX)
-    cv::Vec4b color;
+    cv::Vec4b color = cv::Vec4b(0, 0, 0, 0);
 };
 
 

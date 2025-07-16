@@ -4,23 +4,74 @@
 #include "frame_data.h"
 
 struct TSDFVoxel {
-    float sdf;
-    cv::Vec4b color;
-    float weight;
+    float sdf = MINF;
+//    cv::Vec4b color = {0, 0, 0, 0};
+    unsigned char weight = 0;
 };
 
 class TSDFVolume {
 public:
-    TSDFVolume(const float voxelSize, const FrameData &firstFrame)
-        : voxelSize(voxelSize) {
-        integrate(firstFrame);
+    TSDFVolume(const float voxelSize, const Vector3f &volumeSize)
+            : voxelSize(voxelSize), volumeSize(volumeSize) {
+        volumeOrigin = -volumeSize / 2.0f; // Center volume around camera by setting origin to the lower corner
+        gridResolution = (volumeSize / voxelSize).array().cast<int>();
+
+        voxelGrid = cv::Mat(
+                gridResolution.z(),
+                gridResolution.y() * gridResolution.x(),
+                CV_8UC(sizeof(TSDFVoxel)),
+                cv::Scalar(0)
+        );
+
+        // Mark all voxels as invalid by default
+#pragma omp parallel for
+        for (int z = 0; z < gridResolution.z(); ++z) {
+            TSDFVoxel *slice = voxelGrid.ptr<TSDFVoxel>(z);
+            for (int i = 0; i < gridResolution.y() * gridResolution.x(); ++i) {
+                slice[i].sdf = MINF;
+            }
+        }
     }
 
     void integrate(const FrameData &frameData) {
-        boundingBox.update(frameData.getBoundingBox());
-        const CameraSpecifications &cameraSpecs = frameData.getCameraSpecifications();
+#pragma omp parallel for
+        for (int z = 0; z < gridResolution.z(); ++z) {
+            TSDFVoxel *slice = voxelGrid.ptr<TSDFVoxel>(z);
+            for (int y = 0; y < gridResolution.y(); ++y) {
+                for (int x = 0; x < gridResolution.x(); ++x) {
+                    Vector3f voxelWorld = volumeOrigin + Vector3i(x, y, z).cast<float>() * voxelSize;
 
-        // TODO: Fusion of the frame data into the TSDF volume
+                    float tsdf = frameData.tsdfValueAt(voxelWorld);
+
+                    // Skip invalid TSDF values
+                    if (tsdf == MINF) {
+                        continue;
+                    }
+
+                    TSDFVoxel &voxel = slice[y * gridResolution.x() + x];
+
+
+                    if (voxel.sdf == MINF) {
+                        // Initialize voxel with the first valid value pair
+                        voxel.sdf = tsdf * static_cast<float>(weightUpdate());
+                        voxel.weight = weightUpdate();
+                    } else {
+                        unsigned char newWeight = static_cast<unsigned char>(
+                                std::min( // Ensure weight does not overflow by truncation
+                                        static_cast<int>(voxel.weight) + static_cast<int>(weightUpdate()),
+                                        static_cast<int>(maxWeight())
+                                )
+                        );
+
+                        voxel.sdf =
+                                (voxel.sdf * static_cast<float>(voxel.weight) +
+                                 tsdf * static_cast<float>(weightUpdate())) /
+                                (static_cast<float>(newWeight));
+                        voxel.weight = newWeight;
+                    }
+                }
+            }
+        }
     }
 
 
@@ -43,9 +94,9 @@ public:
                 Vector3f rayDirection = Rcw * (cameraSpecs.intrinsicsInverse * pixel).normalized();
 
                 castRay(
-                    cameraOrigin, rayDirection,
-                    vertexRow[u],
-                    cameraSpecs.minDepthRange, cameraSpecs.maxDepthRange
+                        cameraOrigin, rayDirection,
+                        vertexRow[u],
+                        cameraSpecs.minDepthRange, cameraSpecs.maxDepthRange
                 );
 
                 computeNormalFromTSDF(vertexRow[u].position.head<3>(), normalRow[u]);
@@ -62,14 +113,25 @@ public:
     }
 
 private:
-    bool isInBounds(const Vector3f &point) const {
-        return boundingBox.contains(point);
+    static unsigned char weightUpdate() {
+        return 1;
+    }
+
+    static unsigned char maxWeight() {
+        return std::numeric_limits<unsigned char>::max();
+    }
+
+    bool isInBounds(const Vector3f &worldPoint) const {
+        Vector3f local_point = worldPoint - volumeOrigin;
+        return (local_point.x() >= 0 && local_point.x() < volumeSize.x() &&
+                local_point.y() >= 0 && local_point.y() < volumeSize.y() &&
+                local_point.z() >= 0 && local_point.z() < volumeSize.z());
     }
 
     bool castRay(
-        const Vector3f &origin, const Vector3f &direction,
-        Vertex &intersectionVertex,
-        const float tMin, const float tMax
+            const Vector3f &origin, const Vector3f &direction,
+            Vertex &intersectionVertex,
+            const float tMin, const float tMax
     ) const {
         // Default result to invalid
         intersectionVertex.position = Vector4f(MINF, MINF, MINF, MINF);
@@ -82,7 +144,7 @@ private:
             return false;
         }
 
-        TSDFVoxel voxel = getInterpolatedVoxel(p);
+        TSDFVoxel voxel = getVoxel(p);
 
         float sdf = voxel.sdf;
         float step = (sdf > TRUNCATION_RADIUS) ? TRUNCATION_RADIUS : std::max(sdf, voxelSize);
@@ -98,7 +160,7 @@ private:
                 return false;
             }
 
-            voxel = getInterpolatedVoxel(p);
+            voxel = getVoxel(p);
             sdf = voxel.sdf;
 
             // Found intersection from inside to outside the surface, thus occluded by the object
@@ -110,7 +172,7 @@ private:
             if (sdf != MINF && sdf <= 0.0f && prevSDF >= 0.0f) {
                 float tInterpolated = t - step * prevSDF / (prevSDF - sdf);
                 intersectionVertex.position = (origin + tInterpolated * direction).homogeneous();
-                intersectionVertex.color = voxel.color;
+//                intersectionVertex.color = voxel.color;
                 return true;
             }
 
@@ -142,12 +204,12 @@ private:
             return;
         }
 
-        float Fx1 = getInterpolatedVoxel(point + dx).sdf;
-        float Fx2 = getInterpolatedVoxel(point - dx).sdf;
-        float Fy1 = getInterpolatedVoxel(point + dy).sdf;
-        float Fy2 = getInterpolatedVoxel(point - dy).sdf;
-        float Fz1 = getInterpolatedVoxel(point + dz).sdf;
-        float Fz2 = getInterpolatedVoxel(point - dz).sdf;
+        float Fx1 = getVoxel(point + dx).sdf;
+        float Fx2 = getVoxel(point - dx).sdf;
+        float Fy1 = getVoxel(point + dy).sdf;
+        float Fy2 = getVoxel(point - dy).sdf;
+        float Fz1 = getVoxel(point + dz).sdf;
+        float Fz2 = getVoxel(point - dz).sdf;
 
         if (Fx1 == MINF || Fx2 == MINF || Fy1 == MINF || Fy2 == MINF || Fz1 == MINF || Fz2 == MINF) {
             return;
@@ -157,14 +219,32 @@ private:
         normal = {n.x(), n.y(), n.z(), 1.0f};
     }
 
-    TSDFVoxel getInterpolatedVoxel(const Vector3f &pos) const {
-        // TODO: Mapping from 3D point to voxel
-        return {0.0f, cv::Vec4b(0, 0, 0, 0), 1.0f};
+    TSDFVoxel getVoxel(const Vector3f &worldPoint) const {
+        Vector3f localPoint = worldPoint - volumeOrigin;
+
+        Vector3i voxelIndices = (localPoint / voxelSize).array()
+                .floor()
+                .cast<int>();
+        voxelIndices = voxelIndices
+                .cwiseMax(Vector3i::Zero())
+                .cwiseMin(gridResolution - Vector3i::Ones());
+
+
+        const int rowStride = gridResolution.x() * gridResolution.y();
+
+        int index = voxelIndices.z() * rowStride
+                    + voxelIndices.y() * gridResolution.x()
+                    + voxelIndices.x();
+        return voxelGrid.at<TSDFVoxel>(voxelIndices.z(), index % rowStride);
     }
 
     float voxelSize;
-    BoundingBox boundingBox;
+    Vector3f volumeSize;
+    Vector3i gridResolution;
     Vector3f volumeOrigin;
+
+    cv::Mat voxelGrid; // 3D grid of voxels, flattened into 2D
+
     cv::Mat vertexMap;
     cv::Mat normalMap;
 };
