@@ -5,6 +5,7 @@
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include <Eigen/StdVector>
+#include <optional>
 
 typedef Eigen::Matrix<unsigned char, 4, 1> Vector4uc;
 
