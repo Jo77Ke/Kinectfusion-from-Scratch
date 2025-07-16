@@ -16,6 +16,8 @@ add_executable(${PROJECT_NAME}
         "src/bilateral_filter.h"
         "src/model.h"
         "src/pose_estimation.h"
+        src/sub_sampling.h
+        src/camera_specs.h
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE

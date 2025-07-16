@@ -2,6 +2,7 @@
 
 #include "utils.h"
 #include "frame_data.h"
+#include "sub_sampling.h"
 
 struct TSDFVoxel {
     float sdf = MINF;
@@ -75,15 +76,15 @@ public:
     }
 
 
-    void predictSurface(const CameraSpecifications &cameraSpecs) {
+    void predictSurface(const CameraSpecifications &cameraSpecs, const Matrix4f &cameraPose) {
         const int imageWidth = static_cast<int>(cameraSpecs.imageWidth);
         const int imageHeight = static_cast<int>(cameraSpecs.imageHeight);
 
         vertexMap = cv::Mat(imageHeight, imageWidth, CV_8UC(sizeof(Vertex)), cv::Mat::AUTO_STEP);
         normalMap = cv::Mat(imageHeight, imageWidth, CV_32FC4);
 
-        const Matrix3f Rcw = cameraSpecs.extrinsics.block<3, 3>(0, 0);
-        const Vector3f cameraOrigin = cameraSpecs.extrinsics.block<3, 1>(0, 3);
+        const Matrix3f Rcw = cameraPose.block<3, 3>(0, 0);
+        const Vector3f cameraOrigin = cameraPose.block<3, 1>(0, 3);
 
 #pragma omp parallel for schedule(dynamic)
         for (int v = 0; v < imageHeight; ++v) {
@@ -247,4 +248,7 @@ private:
 
     cv::Mat vertexMap;
     cv::Mat normalMap;
+
+    std::vector<cv::Mat> vertexPyramid;
+    std::vector<cv::Mat> normalPyramid;
 };

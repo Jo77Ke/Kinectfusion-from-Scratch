@@ -1,118 +1,26 @@
 #pragma once
 
-#include <Eigen/Geometry>
 #include <utility>
 #include <fstream>
 #include <numeric>
 
 #include "utils.h"
-#include "bilateral_filter.h"
+#include "camera_specs.h"
+#include "sub_sampling.h"
+
 
 constexpr float TRIANGULATION_EDGE_THRESHOLD = 0.01f; // 1cm
 
 constexpr float TRUNCATION_RADIUS = 0.05f; // 5cm
 
-struct CameraSpecifications {
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-
-    unsigned int imageWidth;
-    unsigned int imageHeight;
-
-    Matrix3f intrinsics;
-    Matrix3f intrinsicsInverse;
-    Matrix4f extrinsics;
-    Matrix4f extrinsicsInverse;
-
-    float minDepthRange = 0.4f;
-    float maxDepthRange = 8.0f;
-
-    CameraSpecifications() :
-            imageWidth(0),
-            imageHeight(0),
-            intrinsics(Matrix3f::Identity()),
-            intrinsicsInverse(Matrix3f::Identity()),
-            extrinsics(Matrix4f::Identity()),
-            extrinsicsInverse(Matrix4f::Identity()) {}
-
-    CameraSpecifications(
-            const unsigned int imageWidth, const unsigned int imageHeight,
-            const Matrix3f &intrinsics, const Matrix4f &extrinsics
-    ) : imageWidth(imageWidth), imageHeight(imageHeight),
-        intrinsics(intrinsics), intrinsicsInverse(intrinsics.inverse()),
-        extrinsics(extrinsics), extrinsicsInverse(extrinsics.inverse()) {}
-};
-
-
-struct BoundingBox {
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-
-    std::optional<Vector3f> min;
-    std::optional<Vector3f> max;
-
-    BoundingBox() : min(std::nullopt), max(std::nullopt) {
-    }
-
-    BoundingBox(const BoundingBox &other) {
-        min = other.min;
-        max = other.max;
-    }
-
-    BoundingBox(const Vector3f &min, const Vector3f &max) : min(min), max(max) {
-    }
-
-    void update(const Vector3f &point) {
-        if (min && max) {
-            min = min->cwiseMin(point);
-            max = max->cwiseMax(point);
-        } else {
-            min = point;
-            max = point;
-        }
-    }
-
-    void update(const BoundingBox &other) {
-        if (other.min && other.max) {
-            update(other.min.value());
-            update(other.max.value());
-        }
-    }
-
-    const std::optional<Vector3f> &center() const {
-        if (min && max) {
-            return 0.5f * (max.value() - min.value());
-        }
-
-        return std::nullopt;
-    }
-
-    bool contains(const Vector3f &point) const {
-        if (min && max) {
-            return (point.array() >= min.value().array()).all()
-                   && (point.array() <= max.value().array()).all();
-        }
-
-        return false;
-    }
-};
-
-struct Vertex {
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-
-    // position stored as 4 floats (4th component is supposed to be 1.0)
-    Vector4f position;
-
-    // color stored as 4 unsigned char (RGBX)
-    cv::Vec4b color = cv::Vec4b(0, 0, 0, 0);
-};
-
 
 void computeFacesForRegion(
-    const cv::Mat &vertexMap,
-    unsigned int imageWidth,
-    int startRow, int endRow,
-    float squaredEdgeThreshold,
-    std::vector<std::tuple<unsigned int, unsigned int, unsigned int> > &faces,
-    size_t &faceCount
+        const cv::Mat &vertexMap,
+        unsigned int imageWidth,
+        int startRow, int endRow,
+        float squaredEdgeThreshold,
+        std::vector<std::tuple<unsigned int, unsigned int, unsigned int> > &faces,
+        size_t &faceCount
 ) {
     for (int v = startRow; v < endRow; ++v) {
         const auto *verticesRow = reinterpret_cast<const Vertex *>(vertexMap.ptr(v));
@@ -149,8 +57,8 @@ void computeFacesForRegion(
 
 
 void writeMesh(
-    const std::string &filename, const cv::Mat &vertexMap,
-    unsigned int imageWidth, unsigned int imageHeight
+        const std::string &filename, const cv::Mat &vertexMap,
+        unsigned int imageWidth, unsigned int imageHeight
 ) {
     // Get number of vertices
     const unsigned int nVertices = imageWidth * imageHeight;
@@ -158,8 +66,8 @@ void writeMesh(
     // Debug assertions
     CV_DbgAssert(vertexMap.type() == CV_8UC(sizeof(Vertex)));
     CV_DbgAssert(vertexMap.rows == imageHeight &&
-        vertexMap.cols == imageWidth &&
-        vertexMap.isContinuous());
+                 vertexMap.cols == imageWidth &&
+                 vertexMap.isContinuous());
     CV_DbgAssert(vertexMap.total() * vertexMap.elemSize() == nVertices * sizeof(Vertex));
 
     // Compute faces
@@ -170,7 +78,7 @@ void writeMesh(
 
     // Share work among threads by dividing the image into horizontal strips
     std::vector<std::vector<std::tuple<unsigned int, unsigned int, unsigned int> > > threadFaces(
-        omp_get_max_threads());
+            omp_get_max_threads());
     std::vector<size_t> threadCounts(omp_get_max_threads(), 0);
 
 #pragma omp parallel
@@ -241,18 +149,17 @@ public:
     FrameData() = default;
 
     FrameData(
-        int frameNumber,
-        CameraSpecifications cameraSpecs,
-        cv::Mat &&depthMap,
-        cv::Mat &&colorMap,
-        const Matrix4f &trajectory
+            int frameNumber,
+            CameraSpecifications cameraSpecs,
+            cv::Mat &&depthMap,
+            cv::Mat &&colorMap,
+            const Matrix4f &trajectory
     ) : frameNumber(frameNumber),
         cameraSpecs(std::move(cameraSpecs)),
         imageWidth(static_cast<int>(cameraSpecs.imageWidth)),
         imageHeight(static_cast<int>(cameraSpecs.imageHeight)),
         depthMap(std::move(depthMap)),
-        colorMap(std::move(colorMap)),
-        trajectory(trajectory) {
+        colorMap(std::move(colorMap)) {
         validityMap = cv::Mat(imageHeight, imageWidth, CV_8UC1);
         validityMap.setTo(0, depthMap == MINF);
         validityMap.setTo(1, depthMap != MINF);
@@ -262,151 +169,31 @@ public:
 
     const CameraSpecifications &getCameraSpecifications() const { return cameraSpecs; }
 
-    const cv::Mat &getDepthMap() const { return depthMap; }
+    const cv::Mat &getRawDepthMap() const { return depthMap; }
 
-    const cv::Mat &getColorMap() const { return colorMap; }
+    const cv::Mat &getRawColorMap() const { return colorMap; }
 
-    const std::vector<cv::Mat>& getDepthPyramid() const {
+    const std::vector<cv::Mat> &getDepthPyramid() const {
         return depthPyramid;
     }
 
-    const std::vector<cv::Mat>& getVertexPyramid() const {
+    const std::vector<cv::Mat> &getVertexPyramid() const {
         return vertexPyramid;
     }
 
-    const std::vector<cv::Mat>& getNormalPyramid() const {
+    const std::vector<cv::Mat> &getNormalPyramid() const {
         return normalPyramid;
     }
 
-    const Matrix4f &getTrajectory() const { return trajectory; }
+    void setPose(const Matrix4f &newPose) {
+        pose = newPose;
+    }
+
+    const Matrix4f &getPose() const { return pose; }
 
     const cv::Mat &getVertexMap() const { return vertexMap; }
 
     const cv::Mat &getNormalMap() const { return normalMap; }
-
-    const BoundingBox &getBoundingBox() const { return boundingBox; }
-
-    void applyBilateralFilter(
-        const float sigma_s, const float sigma_r
-    ) {
-        cv::Mat filteredDepthMap = cv::Mat(imageHeight, imageWidth, CV_32F);
-        bilateralFilter(depthMap, filteredDepthMap, sigma_s, sigma_r);
-        depthMap = std::move(filteredDepthMap);
-    }
-
-    void buildPyramid(int levels, float sigma_r) {
-        buildDepthPyramid(levels, sigma_r);
-        buildVertexPyramid();
-        buildNormalPyramid();
-    }
-
-    void buildDepthPyramid(int levels, float sigma_r) {
-        depthPyramid.clear();
-        depthPyramid.resize(levels);
-
-        // Level 0 = gefilterte Tiefe
-        depthPyramid[0] = depthMap.clone();
-
-        for (int l = 1; l < levels; ++l) {
-            const cv::Mat &prev = depthPyramid[l - 1];
-            const int w = prev.cols / 2;
-            const int h = prev.rows / 2;
-
-            cv::Mat current = cv::Mat::zeros(h, w, CV_32F);
-
-#pragma omp parallel for
-            for (int y = 0; y < h; ++y) {
-                for (int x = 0; x < w; ++x) {
-                    std::vector<float> validValues;
-                    float center = prev.at<float>(y * 2, x * 2);
-
-                    if (center == MINF) continue;
-
-                    for (int dy = 0; dy <= 1; ++dy) {
-                        for (int dx = 0; dx <= 1; ++dx) {
-                            float val = prev.at<float>(y * 2 + dy, x * 2 + dx);
-                            if (val != MINF && std::abs(val - center) <= 3.0f * sigma_r) {
-                                validValues.push_back(val);
-                            }
-                        }
-                    }
-
-                    if (!validValues.empty()) {
-                        float avg = std::accumulate(validValues.begin(), validValues.end(), 0.0f) / validValues.size();
-                        current.at<float>(y, x) = avg;
-                    } else {
-                        current.at<float>(y, x) = MINF;
-                    }
-                }
-            }
-
-            depthPyramid[l] = current;
-        }
-    }
-
-    void buildVertexPyramid() {
-        vertexPyramid.clear();
-        vertexPyramid.resize(depthPyramid.size());
-
-        for (size_t l = 0; l < depthPyramid.size(); ++l) {
-            const cv::Mat& depth = depthPyramid[l];
-            const int h = depth.rows;
-            const int w = depth.cols;
-            cv::Mat vertexMapLevel = cv::Mat(h, w, CV_32FC4);
-
-#pragma omp parallel for
-            for (int v = 0; v < h; ++v) {
-                for (int u = 0; u < w; ++u) {
-                    float d = depth.at<float>(v, u);
-                    if (d == MINF) {
-                        vertexMapLevel.at<cv::Vec4f>(v, u) = cv::Vec4f(MINF, MINF, MINF, MINF);
-                        continue;
-                    }
-
-                    Vector3f pos = cameraSpecs.intrinsicsInverse * d * Vector3f(u, v, 1.0f);
-                    Vector4f globalPos = trajectory.inverse() * cameraSpecs.extrinsicsInverse * pos.homogeneous();
-                    vertexMapLevel.at<cv::Vec4f>(v, u) = cv::Vec4f(globalPos.x(), globalPos.y(), globalPos.z(), 1.0f);
-                }
-            }
-
-            vertexPyramid[l] = vertexMapLevel;
-        }
-    }
-
-    void buildNormalPyramid() {
-        normalPyramid.clear();
-        normalPyramid.resize(vertexPyramid.size());
-
-        for (size_t l = 0; l < vertexPyramid.size(); ++l) {
-            const cv::Mat& vertexMap = vertexPyramid[l];
-            const int h = vertexMap.rows;
-            const int w = vertexMap.cols;
-
-            cv::Mat normalMap = cv::Mat(h, w, CV_32FC4);
-
-#pragma omp parallel for
-            for (int v = 0; v < h - 1; ++v) {
-                for (int u = 0; u < w - 1; ++u) {
-                    const auto& center = vertexMap.at<cv::Vec4f>(v, u);
-                    const auto& right = vertexMap.at<cv::Vec4f>(v, u + 1);
-                    const auto& down  = vertexMap.at<cv::Vec4f>(v + 1, u);
-
-                    if (center[0] == MINF || right[0] == MINF || down[0] == MINF) {
-                        normalMap.at<cv::Vec4f>(v, u) = cv::Vec4f(MINF, MINF, MINF, MINF);
-                        continue;
-                    }
-
-                    Vector3f du = Vector3f(right[0], right[1], right[2]) - Vector3f(center[0], center[1], center[2]);
-                    Vector3f dv = Vector3f(down[0],  down[1],  down[2])  - Vector3f(center[0], center[1], center[2]);
-
-                    Vector3f n = du.cross(dv).normalized();
-                    normalMap.at<cv::Vec4f>(v, u) = cv::Vec4f(n.x(), n.y(), n.z(), 1.0f);
-                }
-            }
-
-            normalPyramid[l] = normalMap;
-        }
-    }
 
     void computeVertexMap() {
         vertexMap = cv::Mat(imageHeight, imageWidth, CV_8UC(sizeof(Vertex)), cv::Mat::AUTO_STEP);
@@ -430,11 +217,9 @@ public:
 
                 Vector3f posInCameraSpace = cameraSpecs.intrinsicsInverse * depthRow[u]
                                             * Vector3f(static_cast<float>(u), static_cast<float>(v), 1.0f);
-                vertex.position =
-                        trajectory.inverse() * cameraSpecs.extrinsicsInverse * posInCameraSpace.homogeneous();
+                vertex.position = pose * posInCameraSpace.homogeneous();
                 vertex.color = colorRow[u];
 
-                boundingBox.update(vertex.position.head<3>());
             }
         }
     }
@@ -462,19 +247,19 @@ public:
                 }
 
                 const Vector3f vertex(
-                    vertexRow[u][0],
-                    vertexRow[u][1],
-                    vertexRow[u][2]
+                        vertexRow[u][0],
+                        vertexRow[u][1],
+                        vertexRow[u][2]
                 );
                 const Vector3f vertexRight(
-                    vertexRow[u + 1][0],
-                    vertexRow[u + 1][1],
-                    vertexRow[u + 1][2]
+                        vertexRow[u + 1][0],
+                        vertexRow[u + 1][1],
+                        vertexRow[u + 1][2]
                 );
                 const Vector3f vertexBelow(
-                    vertexRowBelow[u][0],
-                    vertexRowBelow[u][1],
-                    vertexRowBelow[u][2]
+                        vertexRowBelow[u][0],
+                        vertexRowBelow[u][1],
+                        vertexRowBelow[u][2]
                 );
 
                 Vector3f du = vertexRight - vertex; // du = V(u+1, v) - V(u,v)
@@ -486,12 +271,18 @@ public:
         }
     }
 
-    void computeCameraCenterInGlobalSpace() {
-        cameraCenterInGlobalSpace = (trajectory.inverse() * cameraSpecs.extrinsicsInverse).col(3).head<3>();
+    void buildPyramids(int levels, float sigmaS, float sigmaR) {
+        buildDepthPyramid(levels, sigmaS, sigmaR, depthPyramid, depthMap);
+        buildVertexPyramid(depthPyramid, cameraSpecs, vertexPyramid);
+        buildNormalPyramid(vertexPyramid, normalPyramid);
     }
 
-    float tsdfValueAt(const Vector3f& globalPoint) const {
-        const Vector3f pointInCameraSpace = (cameraSpecs.extrinsics * trajectory).topLeftCorner<3, 4>() * globalPoint.homogeneous();
+    void computeCameraCenterInGlobalSpace() {
+        cameraCenterInGlobalSpace = pose.col(3).head<3>();
+    }
+
+    float tsdfValueAt(const Vector3f &globalPoint) const {
+        const Vector3f pointInCameraSpace = pose.topLeftCorner<3, 4>() * globalPoint.homogeneous();
 
         Vector3f projectedPoint = cameraSpecs.intrinsics * pointInCameraSpace;
         projectedPoint /= projectedPoint.z();
@@ -500,7 +291,7 @@ public:
         if (projectedPoint.x() < 0 || projectedPoint.x() >= static_cast<float>(imageWidth) ||
             projectedPoint.y() < 0 || projectedPoint.y() >= static_cast<float>(imageHeight)) {
             return MINF;
-            }
+        }
 
         const Vector3i pixel = projectedPoint.cast<int>(); // Nearest neighbor projection via rounding down
 
@@ -530,18 +321,23 @@ public:
 
         return std::min(1.0f, deltaDepth / TRUNCATION_RADIUS) * static_cast<float>(sgn(deltaDepth));
     }
+
 private:
     int frameNumber{};
+
     CameraSpecifications cameraSpecs;
     int imageWidth{};
     int imageHeight{};
+
     cv::Mat depthMap;
     cv::Mat colorMap;
-    Matrix4f trajectory;
+
+    Matrix4f pose;
+
     cv::Mat vertexMap;
     cv::Mat validityMap;
     cv::Mat normalMap;
-    BoundingBox boundingBox;
+
     Vector3f cameraCenterInGlobalSpace;
     std::vector<cv::Mat> depthPyramid;
     std::vector<cv::Mat> vertexPyramid;

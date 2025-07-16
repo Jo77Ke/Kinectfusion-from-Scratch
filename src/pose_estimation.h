@@ -14,8 +14,9 @@ bring them into previous frame's coordinate system
 
 #pragma once
 
+#include "utils.h"
+#include "model.h"
 #include "frame_data.h"
-#include <Eigen/Geometry>
 #include <vector>
 
 struct IcpParameters {
@@ -26,11 +27,20 @@ struct IcpParameters {
 
 Eigen::Matrix4f estimateCameraPoseICP(
     const FrameData& currentFrame,
-    const FrameData& previousFrame, //TODO SWITCH WITH RAYCASTED MODEL
+    const TSDFVolume& model,
     const Eigen::Matrix4f& initialGuessPose,
     const IcpParameters& params
 ) {
+    const auto currentVertexPyramid = currentFrame.getVertexPyramid();
+    const auto currentNormalPyramid = currentFrame.getNormalPyramid();
 
+    const auto* currentVertexMapData = reinterpret_cast<const Vertex*>(currentFrame.getVertexMap().data);
+    const auto* currentNormalMapData = reinterpret_cast<const cv::Vec4f*>(currentFrame.getNormalMap().data);
+
+    const auto* modelVertexMap = reinterpret_cast<const Vertex*>(model.getVertexMap().data);
+    const auto* modelNormalMap = reinterpret_cast<const cv::Vec4f*>(model.getNormalMap().data);
+    
+    
   // 1. Start with current estimated pose
   Eigen::Matrix4f currentEstimatedPose = initialGuessPose;
   
@@ -40,14 +50,9 @@ Eigen::Matrix4f estimateCameraPoseICP(
     Eigen::Matrix<float, 6, 6> JtJ = Eigen::Matrix<float, 6, 6>::Zero(); // 6DoF
     Eigen::Matrix<float, 6, 1> JtE = Eigen::Matrix<float, 6, 1>::Zero();
 
-
-    // TODO ADD GETTERS?
+    
     // Map data
-    const auto* currentVertexMapData = reinterpret_cast<const Vertex*>(currentFrame.getVertexMap().data);
-    const auto* currentNormalMapData = reinterpret_cast<const cv::Vec4f*>(currentFrame.getNormalMap().data);
-
-    const auto* previousVertexMapData = reinterpret_cast<const Vertex*>(previousFrame.getVertexMap().data);
-    const auto* previousNormalMapData = reinterpret_cast<const cv::Vec4f*>(previousFrame.getNormalMap().data);
+    
 
     int validCorrespondences = 0;
 
@@ -71,7 +76,7 @@ Eigen::Matrix4f estimateCameraPoseICP(
         const Vertex& previousVertex = previousVertexMapData[v * previousFrame.getImageWidth() + u];
         const Eigen::Vector4f q_k_prev_hom = previousVertex.position; // Target point q_k
         
-        const cv::Vec4f n_k_prev_cv = previousNormalMapData[v * previousFrame.getImageWidth() + u];
+        const cv::Vec4f n_k_prev_cv = modelNormalMap[v * previousFrame.getImageWidth() + u];
         const Eigen::Vector3f n_k_prev = Eigen::Vector3f(n_k_prev_cv[0], n_k_prev_cv[1], n_k_prev_cv[2]); // Target normal n_k
 
         // Check if they are valid
