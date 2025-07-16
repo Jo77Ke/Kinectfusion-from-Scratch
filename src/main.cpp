@@ -35,9 +35,11 @@ int main() {
             frameData.applyBilateralFilter(sigma_s, sigma_r);
         }
 
+        const int pyramidLevels = 3;
+        frameData.buildPyramid(pyramidLevels, sigma_r);
+
         frameData.computeVertexMap();
         frameData.computeNormalMap();
-
         frameData.computeCameraCenterInGlobalSpace();
 
         std::stringstream ss;
