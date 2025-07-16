@@ -2,121 +2,120 @@
 
 #include "utils.h"
 #include "frame_data.h"
-#include <vector>
-#include <cmath>
 
 struct TSDFVoxel {
     float sdf;
+    cv::Vec4b color;
     float weight;
 };
 
 class TSDFVolume {
 public:
-    Eigen::Vector3f volumeOrigin;
-    float voxelSize;
-    int dimX, dimY, dimZ;
-
-    TSDFVoxel getInterpolatedVoxel(const Eigen::Vector3f &pos) const {
-        // Dummy: hier sollte trilineare Interpolation passieren
-        return {0.0f, 1.0f};
+    TSDFVolume(const float voxelSize, const FrameData &firstFrame)
+        : voxelSize(voxelSize) {
+        integrate(firstFrame);
     }
 
-    bool isInBounds(const Eigen::Vector3f &pos) const {
-        return (pos.x() >= volumeOrigin.x() && pos.x() < volumeOrigin.x() + (float) dimX * voxelSize &&
-                pos.y() >= volumeOrigin.y() && pos.y() < volumeOrigin.y() + (float) dimY * voxelSize &&
-                pos.z() >= volumeOrigin.z() && pos.z() < volumeOrigin.z() + (float) dimZ * voxelSize);
+    void integrate(const FrameData &frameData) {
+        boundingBox.update(frameData.getBoundingBox());
+        const CameraSpecifications &cameraSpecs = frameData.getCameraSpecifications();
+
+        // TODO: Fusion of the frame data into the TSDF volume
     }
-};
 
-class SurfaceRayCaster {
-public:
-    SurfaceRayCaster(
-            const TSDFVolume &volume,
-            const Eigen::Matrix3f &K,
-            const Eigen::Matrix4f &Tcw,
-            int width, int height,
-            float mu
-    ) : tsdf(volume), K(K), Tcw(Tcw), width(width), height(height), mu(mu) {}
 
-    void castRay(
-            std::vector<Eigen::Vector3f> &vertexMap,
-            std::vector<Eigen::Vector3f> &normalMap
-    ) {
-        vertexMap.resize(width * height, Eigen::Vector3f::Zero());
-        normalMap.resize(width * height, Eigen::Vector3f::Zero());
+    void predictSurface(const CameraSpecifications &cameraSpecs) {
+        const int imageWidth = static_cast<int>(cameraSpecs.imageWidth);
+        const int imageHeight = static_cast<int>(cameraSpecs.imageHeight);
 
-        Eigen::Matrix3f Rcw = Tcw.block<3, 3>(0, 0);
-        Eigen::Vector3f tcw = Tcw.block<3, 1>(0, 3);
+        vertexMap = cv::Mat(imageHeight, imageWidth, CV_8UC(sizeof(Vertex)), cv::Mat::AUTO_STEP);
+        normalMap = cv::Mat(imageHeight, imageWidth, CV_32FC4);
 
-        for (int v = 0; v < height; ++v) {
-            for (int u = 0; u < width; ++u) {
-                Eigen::Vector3f pixel((float) u, (float) v, 1.0f);
-                Eigen::Vector3f rayDir = K.inverse() * pixel;
-                rayDir.normalize();
+        const Matrix3f Rcw = cameraSpecs.extrinsics.block<3, 3>(0, 0);
+        const Vector3f cameraOrigin = cameraSpecs.extrinsics.block<3, 1>(0, 3);
 
-                Eigen::Vector3f origin = tcw;
-                Eigen::Vector3f dir = Rcw * rayDir;
+#pragma omp parallel for schedule(dynamic)
+        for (int v = 0; v < imageHeight; ++v) {
+            Vertex *vertexRow = reinterpret_cast<Vertex *>(vertexMap.ptr(v));
+            cv::Vec4f *normalRow = normalMap.ptr<cv::Vec4f>(v);
+            for (int u = 0; u < imageWidth; ++u) {
+                Vector3f pixel(static_cast<float>(u), static_cast<float>(v), 1.0f);
+                Vector3f rayDirection = Rcw * (cameraSpecs.intrinsicsInverse * pixel).normalized();
 
-                Eigen::Vector3f point;
-                int idx = v * width + u;
-                if (findSurfaceIntersection(origin, dir, point)) {
-                    vertexMap[idx] = point;
-                    normalMap[idx] = computeNormal(point);
-                } else {
-                    vertexMap[idx] = Vector3f(MINF, MINF, MINF);
-                    normalMap[idx] = Vector3f(MINF, MINF, MINF);
-                }
+                castRay(
+                    cameraOrigin, rayDirection,
+                    vertexRow[u],
+                    cameraSpecs.minDepthRange, cameraSpecs.maxDepthRange
+                );
+
+                computeNormalFromTSDF(vertexRow[u].position.head<3>(), normalRow[u]);
             }
         }
     }
 
+    const cv::Mat &getVertexMap() const {
+        return vertexMap;
+    }
+
+    const cv::Mat &getNormalMap() const {
+        return normalMap;
+    }
+
 private:
-    const TSDFVolume &tsdf;
-    Eigen::Matrix3f K;
-    Eigen::Matrix4f Tcw;
-    int width, height;
-    float mu;
+    bool isInBounds(const Vector3f &point) const {
+        return boundingBox.contains(point);
+    }
 
-    bool findSurfaceIntersection(const Eigen::Vector3f &origin,
-                                 const Eigen::Vector3f &direction,
-                                 Eigen::Vector3f &surfacePoint) {
-        float t = 0.4f;
-        float t_max = 8.0f;
+    bool castRay(
+        const Vector3f &origin, const Vector3f &direction,
+        Vertex &intersectionVertex,
+        const float tMin, const float tMax
+    ) const {
+        // Default result to invalid
+        intersectionVertex.position = Vector4f(MINF, MINF, MINF, MINF);
+        intersectionVertex.color = cv::Vec4b(0, 0, 0, 0);
 
-        Eigen::Vector3f p = origin + t * direction;
-        TSDFVoxel voxel = tsdf.getInterpolatedVoxel(p);
-
-        if (!tsdf.isInBounds(p)) { // Ray outside the volume bounds
+        float t = tMin;
+        Vector3f p = origin + t * direction;
+        // Ray starts outside the volume bounds
+        if (!isInBounds(p)) {
             return false;
         }
 
+        TSDFVoxel voxel = getInterpolatedVoxel(p);
+
         float sdf = voxel.sdf;
-        float step = (sdf > mu) ? mu : std::max(sdf, tsdf.voxelSize);
+        float step = (sdf > TRUNCATION_RADIUS) ? TRUNCATION_RADIUS : std::max(sdf, voxelSize);
         t += step;
         float prevSDF = sdf;
 
 
-        while (t < t_max) {
+        while (t < tMax) {
             p = origin + t * direction;
-            voxel = tsdf.getInterpolatedVoxel(p);
+
+            // Ray left the volume bounds
+            if (!isInBounds(p)) {
+                return false;
+            }
+
+            voxel = getInterpolatedVoxel(p);
             sdf = voxel.sdf;
 
-
-            if (!tsdf.isInBounds(p)) { // Ray outside the volume bounds
+            // Found intersection from inside to outside the surface, thus occluded by the object
+            if (prevSDF != MINF && prevSDF <= 0.0f && sdf >= 0.0f) {
                 return false;
             }
 
-            if (prevSDF != MINF && prevSDF <= 0.0f && sdf >= 0.0f) { // Intersection from inside to outside the volume
-                return false;
-            }
-
+            // Found intersection from outside to inside the surface
             if (sdf != MINF && sdf <= 0.0f && prevSDF >= 0.0f) {
-                float tInterp = t - step * prevSDF / (prevSDF - sdf);
-                surfacePoint = origin + tInterp * direction;
+                float tInterpolated = t - step * prevSDF / (prevSDF - sdf);
+                intersectionVertex.position = (origin + tInterpolated * direction).homogeneous();
+                intersectionVertex.color = voxel.color;
                 return true;
             }
 
-            step = (sdf > mu) ? mu : std::max(sdf, tsdf.voxelSize);
+            // Set step size based on the truncated SDF value while ensuring to land in a new voxel
+            step = (sdf > TRUNCATION_RADIUS) ? TRUNCATION_RADIUS : std::max(sdf, voxelSize);
             t += step;
             prevSDF = sdf;
         }
@@ -124,21 +123,48 @@ private:
         return false;
     }
 
-    Eigen::Vector3f computeNormal(const Eigen::Vector3f &p) {
-        float delta = tsdf.voxelSize;
+    void computeNormalFromTSDF(const Vector3f &point, cv::Vec4f &normal) const {
+        normal = {MINF, MINF, MINF, MINF}; // Default to undefined normal
 
-        Eigen::Vector3f dx(delta, 0, 0);
-        Eigen::Vector3f dy(0, delta, 0);
-        Eigen::Vector3f dz(0, 0, delta);
+        // Normal is undefined outside the volume
+        if (!isInBounds(point)) {
+            return;
+        }
 
-        float Fx1 = tsdf.getInterpolatedVoxel(p + dx).sdf;
-        float Fx2 = tsdf.getInterpolatedVoxel(p - dx).sdf;
-        float Fy1 = tsdf.getInterpolatedVoxel(p + dy).sdf;
-        float Fy2 = tsdf.getInterpolatedVoxel(p - dy).sdf;
-        float Fz1 = tsdf.getInterpolatedVoxel(p + dz).sdf;
-        float Fz2 = tsdf.getInterpolatedVoxel(p - dz).sdf;
+        Vector3f dx(voxelSize, 0, 0);
+        Vector3f dy(0, voxelSize, 0);
+        Vector3f dz(0, 0, voxelSize);
 
-        Eigen::Vector3f n(Fx1 - Fx2, Fy1 - Fy2, Fz1 - Fz2);
-        return n.normalized();
+        // Normal is undefined if any of the neighboring voxels are out of bounds
+        if (!isInBounds(point + dx) || !isInBounds(point - dx) ||
+            !isInBounds(point + dy) || !isInBounds(point - dy) ||
+            !isInBounds(point + dz) || !isInBounds(point - dz)) {
+            return;
+        }
+
+        float Fx1 = getInterpolatedVoxel(point + dx).sdf;
+        float Fx2 = getInterpolatedVoxel(point - dx).sdf;
+        float Fy1 = getInterpolatedVoxel(point + dy).sdf;
+        float Fy2 = getInterpolatedVoxel(point - dy).sdf;
+        float Fz1 = getInterpolatedVoxel(point + dz).sdf;
+        float Fz2 = getInterpolatedVoxel(point - dz).sdf;
+
+        if (Fx1 == MINF || Fx2 == MINF || Fy1 == MINF || Fy2 == MINF || Fz1 == MINF || Fz2 == MINF) {
+            return;
+        }
+
+        Vector3f n = Vector3f(Fx1 - Fx2, Fy1 - Fy2, Fz1 - Fz2).normalized();
+        normal = {n.x(), n.y(), n.z(), 1.0f};
     }
+
+    TSDFVoxel getInterpolatedVoxel(const Vector3f &pos) const {
+        // TODO: Mapping from 3D point to voxel
+        return {0.0f, cv::Vec4b(0, 0, 0, 0), 1.0f};
+    }
+
+    float voxelSize;
+    BoundingBox boundingBox;
+    Vector3f volumeOrigin;
+    cv::Mat vertexMap;
+    cv::Mat normalMap;
 };
