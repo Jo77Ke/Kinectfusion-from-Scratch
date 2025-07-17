@@ -123,3 +123,55 @@ void buildNormalPyramid(
         normalPyramid[l] = normalMap;
     }
 }
+
+void buildVertexPyramidFromVertexMap(int levels, float sigma_r,  const cv::Mat &vertexMap, std::vector<cv::Mat> &vertexPyramid) {
+    vertexPyramid.clear();
+    vertexPyramid.resize(levels);
+
+    vertexPyramid[0] = vertexMap.clone();
+
+    for (int l = 1; l < levels; ++l) {
+        const cv::Mat &prev = vertexPyramid[l - 1];
+        const int w = prev.cols / 2;
+        const int h = prev.rows / 2;
+
+        cv::Mat current = cv::Mat(h, w, CV_32FC4);
+
+#pragma omp parallel for
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                cv::Vec4f center = prev.at<cv::Vec4f>(y * 2, x * 2);
+                if (center[2] == MINF) {
+                    current.at<cv::Vec4f>(y, x) = cv::Vec4f(MINF, MINF, MINF, MINF);
+                    continue;
+                }
+
+                std::vector<cv::Vec3f> validPoints;
+
+                for (int dy = 0; dy <= 1; ++dy) {
+                    for (int dx = 0; dx <= 1; ++dx) {
+                        int yy = y * 2 + dy;
+                        int xx = x * 2 + dx;
+                        if (yy >= prev.rows || xx >= prev.cols) continue;
+
+                        cv::Vec4f sample = prev.at<cv::Vec4f>(yy, xx);
+                        if (sample[2] != MINF && std::abs(sample[2] - center[2]) < 3.0f * sigma_r) {
+                            validPoints.push_back(cv::Vec3f(sample[0], sample[1], sample[2]));
+                        }
+                    }
+                }
+
+                if (!validPoints.empty()) {
+                    cv::Vec3f avg(0, 0, 0);
+                    for (const auto &pt : validPoints) avg += pt;
+                    avg /= static_cast<float>(validPoints.size());
+                    current.at<cv::Vec4f>(y, x) = cv::Vec4f(avg[0], avg[1], avg[2], 1.0f);
+                } else {
+                    current.at<cv::Vec4f>(y, x) = cv::Vec4f(MINF, MINF, MINF, MINF);
+                }
+            }
+        }
+
+        vertexPyramid[l] = current;
+    }
+}
