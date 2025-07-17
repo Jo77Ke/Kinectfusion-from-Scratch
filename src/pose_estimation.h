@@ -23,6 +23,9 @@ struct IcpParameters {
     int maxIterations;
     float terminationThreshold;
     float maxCorrespondenceDistance;
+
+    IcpParameters(const int maxIter, const float termThresh, const float maxCorrDist)
+        : maxIterations(maxIter), terminationThreshold(termThresh), maxCorrespondenceDistance(maxCorrDist) {}
 };
 
 Matrix4f estimateCameraPoseICP(

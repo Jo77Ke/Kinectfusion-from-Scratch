@@ -105,12 +105,26 @@ public:
         }
     }
 
+    void buildPyramids(const int levels, const float sigma_r) {
+        buildVertexPyramidFromVertexMap(levels, sigma_r, vertexMap, vertexPyramid);
+        buildNormalPyramid(vertexPyramid, normalPyramid);
+        normalPyramid[0] = normalMap; // Use the original normal map as the first level of the pyramid
+    }
+
     const cv::Mat &getVertexMap() const {
         return vertexMap;
     }
 
     const cv::Mat &getNormalMap() const {
         return normalMap;
+    }
+
+    const cv::Mat &getVertexPyramidAtLevel(int level) const {
+        return vertexPyramid[level];
+    }
+
+    const cv::Mat &getNormalPyramidAtLevel(int level) const {
+        return normalPyramid[level];
     }
 
 private:

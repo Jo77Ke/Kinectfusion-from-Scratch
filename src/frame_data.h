@@ -19,13 +19,14 @@ public:
             CameraSpecifications cameraSpecs,
             cv::Mat &&depthMap,
             cv::Mat &&colorMap,
-            const Matrix4f &trajectory
+            const Matrix4f &groundTruthPose
     ) : frameNumber(frameNumber),
         cameraSpecs(std::move(cameraSpecs)),
         imageWidth(static_cast<int>(cameraSpecs.imageWidth)),
         imageHeight(static_cast<int>(cameraSpecs.imageHeight)),
         depthMap(std::move(depthMap)),
-        colorMap(std::move(colorMap)) {
+        colorMap(std::move(colorMap)),
+        groundTruthPose(groundTruthPose) {
         validityMap = cv::Mat(imageHeight, imageWidth, CV_8UC1);
         validityMap.setTo(0, depthMap == MINF);
         validityMap.setTo(1, depthMap != MINF);
@@ -39,16 +40,16 @@ public:
 
     const cv::Mat &getRawColorMap() const { return colorMap; }
 
-    const std::vector<cv::Mat> &getDepthPyramid() const {
-        return depthPyramid;
+    const cv::Mat &getDepthPyramidAtLevel(int level) const {
+        return depthPyramid[level];
     }
 
-    const std::vector<cv::Mat> &getVertexPyramid() const {
-        return vertexPyramid;
+    const cv::Mat &getVertexPyramidAtLevel(int level) const {
+        return vertexPyramid[level];
     }
 
-    const std::vector<cv::Mat> &getNormalPyramid() const {
-        return normalPyramid;
+    const cv::Mat &getNormalPyramidAtLevel(int level) const {
+        return normalPyramid[level];
     }
 
     void setPose(const Matrix4f &newPose) {
@@ -199,6 +200,7 @@ private:
     cv::Mat colorMap;
 
     Matrix4f pose;
+    Matrix4f groundTruthPose;
 
     cv::Mat vertexMap;
     cv::Mat validityMap;
