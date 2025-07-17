@@ -18,6 +18,8 @@ add_executable(${PROJECT_NAME}
         "src/pose_estimation.h"
         src/sub_sampling.h
         src/camera_specs.h
+        src/vertex.h
+        src/output.h
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE

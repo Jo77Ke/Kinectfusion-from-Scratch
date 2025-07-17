@@ -1,148 +1,14 @@
 #pragma once
 
 #include <utility>
-#include <fstream>
 #include <numeric>
 
 #include "utils.h"
 #include "camera_specs.h"
+#include "vertex.h"
 #include "sub_sampling.h"
 
-
-constexpr float TRIANGULATION_EDGE_THRESHOLD = 0.01f; // 1cm
-
 constexpr float TRUNCATION_RADIUS = 0.05f; // 5cm
-
-
-void computeFacesForRegion(
-        const cv::Mat &vertexMap,
-        unsigned int imageWidth,
-        int startRow, int endRow,
-        float squaredEdgeThreshold,
-        std::vector<std::tuple<unsigned int, unsigned int, unsigned int> > &faces,
-        size_t &faceCount
-) {
-    for (int v = startRow; v < endRow; ++v) {
-        const auto *verticesRow = reinterpret_cast<const Vertex *>(vertexMap.ptr(v));
-        const auto *verticesRowBelow = reinterpret_cast<const Vertex *>(vertexMap.ptr(v + 1));
-
-        for (int u = 0; u < imageWidth - 1; ++u) {
-            const Vertex &a = verticesRow[u];
-            const Vertex &d = verticesRowBelow[u + 1];
-            if (a.position.x() == MINF || d.position.x() == MINF) continue;
-
-            unsigned int idxA = u + v * imageWidth;
-            unsigned int idxD = u + 1 + (v + 1) * imageWidth;
-            const Vertex &b = verticesRow[u + 1];
-            const Vertex &c = verticesRowBelow[u];
-
-            // Triangle ABD
-            if (b.position.x() != MINF
-                && (a.position - b.position).squaredNorm() < squaredEdgeThreshold
-                && (a.position - d.position).squaredNorm() < squaredEdgeThreshold
-                && (b.position - d.position).squaredNorm() < squaredEdgeThreshold) {
-                faces[faceCount++] = {idxA, u + 1 + v * imageWidth, idxD};
-            }
-
-            // Triangle ACD
-            if (c.position.x() != MINF
-                && (a.position - c.position).squaredNorm() < squaredEdgeThreshold
-                && (a.position - d.position).squaredNorm() < squaredEdgeThreshold
-                && (c.position - d.position).squaredNorm() < squaredEdgeThreshold) {
-                faces[faceCount++] = {idxA, u + (v + 1) * imageWidth, idxD};
-            }
-        }
-    }
-}
-
-
-void writeMesh(
-        const std::string &filename, const cv::Mat &vertexMap,
-        unsigned int imageWidth, unsigned int imageHeight
-) {
-    // Get number of vertices
-    const unsigned int nVertices = imageWidth * imageHeight;
-
-    // Debug assertions
-    CV_DbgAssert(vertexMap.type() == CV_8UC(sizeof(Vertex)));
-    CV_DbgAssert(vertexMap.rows == imageHeight &&
-                 vertexMap.cols == imageWidth &&
-                 vertexMap.isContinuous());
-    CV_DbgAssert(vertexMap.total() * vertexMap.elemSize() == nVertices * sizeof(Vertex));
-
-    // Compute faces
-    const float squaredEdgeThreshold = TRIANGULATION_EDGE_THRESHOLD * TRIANGULATION_EDGE_THRESHOLD;
-
-    std::vector<std::tuple<unsigned int, unsigned int, unsigned int> > faces;
-    size_t nFaces = 0;
-
-    // Share work among threads by dividing the image into horizontal strips
-    std::vector<std::vector<std::tuple<unsigned int, unsigned int, unsigned int> > > threadFaces(
-            omp_get_max_threads());
-    std::vector<size_t> threadCounts(omp_get_max_threads(), 0);
-
-#pragma omp parallel
-    {
-        const int threadID = omp_get_thread_num();
-        const int numberOfRows = imageHeight - 1;
-        const int chunkSize = (numberOfRows + omp_get_num_threads() - 1) / omp_get_num_threads();
-        const int startRow = std::min(threadID * chunkSize, numberOfRows);
-        const int endRow = std::min((threadID + 1) * chunkSize, numberOfRows);
-
-        threadFaces[threadID].resize(2 * (imageWidth - 1) * (endRow - startRow));
-        size_t localCount = 0;
-
-        computeFacesForRegion(vertexMap, imageWidth,
-                              startRow, endRow,
-                              squaredEdgeThreshold,
-                              threadFaces[threadID], localCount);
-
-        threadCounts[threadID] = localCount;
-        threadFaces[threadID].resize(localCount);
-    }
-
-    // Combine results from all threads
-    nFaces = std::accumulate(threadCounts.begin(), threadCounts.end(), size_t(0));
-    faces.reserve(nFaces);
-    for (auto &tf: threadFaces) {
-        faces.insert(faces.end(), tf.begin(), tf.end());
-    }
-
-    // Write off file
-    std::ofstream outFile(filename);
-    if (!outFile.is_open()) throw std::runtime_error("Could not open file for writing: " + filename);
-
-    // Write header
-    outFile << "COFF\n" << nVertices << " " << nFaces << " 0\n";
-
-    // Save vertices
-    auto *vertex = reinterpret_cast<Vertex *>(vertexMap.data);
-    for (int i = 0; i < nVertices; ++i, ++vertex) {
-        Vertex &v = *vertex;
-        if (v.position.x() != MINF) {
-            outFile << v.position.x() << " " << v.position.y() << " " << v.position.z()
-                    << " " << static_cast<int>(v.color(0))
-                    << " " << static_cast<int>(v.color(1))
-                    << " " << static_cast<int>(v.color(2))
-                    << " " << static_cast<int>(v.color(3))
-                    << "\n";
-        } else {
-            outFile << "0 0 0\n";
-        }
-    }
-
-    // Save faces
-    for (size_t i = 0; i < nFaces; ++i) {
-        const auto face = faces[i];
-        outFile << "3 "
-                << std::get<0>(face) << " "
-                << std::get<1>(face) << " "
-                << std::get<2>(face) << "\n";
-    }
-
-    outFile.close();
-}
-
 
 class FrameData {
 public:
