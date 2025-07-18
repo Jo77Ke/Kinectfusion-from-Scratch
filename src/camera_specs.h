@@ -22,7 +22,7 @@ struct CameraSpecifications {
 
     CameraSpecifications(
             const unsigned int imageWidth, const unsigned int imageHeight,
-            const Matrix3f &intrinsics, const Matrix4f &extrinsics
+            const Matrix3f &intrinsics
     ) : imageWidth(imageWidth), imageHeight(imageHeight),
         intrinsics(intrinsics), intrinsicsInverse(intrinsics.inverse()) {}
 };

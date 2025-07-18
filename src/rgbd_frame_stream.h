@@ -35,13 +35,11 @@ public:
         int imageHeight = 480;
 
         Matrix3f intrinsics = (Matrix3f() << 525.0f, 0.0f, 319.5f, 0.0f, 525.0f, 239.5f, 0.0f, 0.0f, 1.0f).finished();
-        auto extrinsics = Matrix4f::Identity();
 
         cameraSpecifications = CameraSpecifications(
                 imageWidth,
                 imageHeight,
-                intrinsics,
-                extrinsics
+                intrinsics
         );
 
 
