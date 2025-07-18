@@ -8,14 +8,14 @@
 constexpr float TRIANGULATION_EDGE_THRESHOLD = 0.01f; // 1cm
 
 
-void computeFacesForRegion(
+size_t computeFacesForRegion(
         const cv::Mat &vertexMap,
         unsigned int imageWidth,
         int startRow, int endRow,
         float squaredEdgeThreshold,
-        std::vector<std::tuple<unsigned int, unsigned int, unsigned int>> &faces,
-        size_t &faceCount
+        std::vector<std::tuple<unsigned int, unsigned int, unsigned int>>& faces
 ) {
+    size_t faceCount = 0;
     for (int v = startRow; v < endRow; ++v) {
         const auto *verticesRow = reinterpret_cast<const Vertex *>(vertexMap.ptr(v));
         const auto *verticesRowBelow = reinterpret_cast<const Vertex *>(vertexMap.ptr(v + 1));
@@ -35,7 +35,8 @@ void computeFacesForRegion(
                 && (a.position - b.position).squaredNorm() < squaredEdgeThreshold
                 && (a.position - d.position).squaredNorm() < squaredEdgeThreshold
                 && (b.position - d.position).squaredNorm() < squaredEdgeThreshold) {
-                faces[faceCount++] = {idxA, u + 1 + v * imageWidth, idxD};
+                faces[faceCount] = {idxA, u + 1 + v * imageWidth, idxD};
+                ++faceCount;
             }
 
             // Triangle ACD
@@ -43,10 +44,13 @@ void computeFacesForRegion(
                 && (a.position - c.position).squaredNorm() < squaredEdgeThreshold
                 && (a.position - d.position).squaredNorm() < squaredEdgeThreshold
                 && (c.position - d.position).squaredNorm() < squaredEdgeThreshold) {
-                faces[faceCount++] = {idxA, u + (v + 1) * imageWidth, idxD};
+                faces[faceCount] = {idxA, u + (v + 1) * imageWidth, idxD};
+                ++faceCount;
             }
         }
     }
+
+    return faceCount;
 }
 
 
@@ -54,7 +58,7 @@ void writeMesh(
         const std::string &filename, const cv::Mat &vertexMap,
         unsigned int imageWidth, unsigned int imageHeight
 ) {
-    if (imageWidth >= 2 && imageHeight >= 2) return; // Ensure there are enough pixels to form faces
+    if (imageWidth < 2 && imageHeight < 2) throw std::runtime_error("No enough pixels to form faces");
 
     // Get number of vertices
     const unsigned int nVertices = imageWidth * imageHeight;
@@ -82,15 +86,16 @@ void writeMesh(
 
         std::vector<std::tuple<unsigned int, unsigned int, unsigned int> > localFaces;
         localFaces.reserve(2 * (imageWidth - 1) * (endRow - startRow));
-        size_t localCount = 0;
+        const size_t localCount = computeFacesForRegion(vertexMap, imageWidth,
+                                                  startRow, endRow,
+                                                  squaredEdgeThreshold,
+                                                  localFaces);
 
-        computeFacesForRegion(vertexMap, imageWidth,
-                              startRow, endRow,
-                              squaredEdgeThreshold,
-                              localFaces, localCount);
 
 #pragma omp critical
-        faces.insert(faces.end(), localFaces.begin(), localFaces.end());
+        {
+            faces.insert(faces.end(), localFaces.begin(), localFaces.begin() + static_cast<int>(localCount));
+        }
     }
 
     const int nFaces = static_cast<int>(faces.size());
@@ -104,7 +109,7 @@ void writeMesh(
 
     // Save vertices
     auto *vertex = reinterpret_cast<Vertex *>(vertexMap.data);
-    for (int i = 0; i < nVertices; ++i, ++vertex) {
+    for (size_t i = 0; i < nVertices; ++i, ++vertex) {
         Vertex &v = *vertex;
         if (v.position.x() != MINF) {
             outFile << v.position.x() << " " << v.position.y() << " " << v.position.z()
