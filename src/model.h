@@ -4,6 +4,7 @@
 #include "frame_data.h"
 #include "sub_sampling.h"
 
+// 4 (float) + 1 (unsigned char) = 5 bytes per voxel
 struct TSDFVoxel {
     float sdf = MINF;
 //    cv::Vec4b color = {0, 0, 0, 0};
@@ -17,30 +18,23 @@ public:
         volumeOrigin = -volumeSize / 2.0f; // Center volume around camera by setting origin to the lower corner
         gridResolution = (volumeSize / voxelSize).array().cast<int>();
 
-        voxelGrid = cv::Mat(
-                gridResolution.z(),
-                gridResolution.y() * gridResolution.x(),
-                CV_8UC(sizeof(TSDFVoxel)),
-                cv::Scalar(0)
-        );
+        size_t totalVoxels = gridResolution.x() * gridResolution.y() * gridResolution.z();
+        voxelGrid.resize(totalVoxels);
 
         // Mark all voxels as invalid by default
 #pragma omp parallel for
-        for (int z = 0; z < gridResolution.z(); ++z) {
-            TSDFVoxel *slice = voxelGrid.ptr<TSDFVoxel>(z);
-            for (int i = 0; i < gridResolution.y() * gridResolution.x(); ++i) {
-                slice[i].sdf = MINF;
-            }
+        for (size_t i = 0; i < totalVoxels; ++i) {
+            voxelGrid[i].sdf = MINF;
         }
     }
 
     void integrate(const FrameData &frameData) {
 #pragma omp parallel for
         for (int z = 0; z < gridResolution.z(); ++z) {
-            TSDFVoxel *slice = voxelGrid.ptr<TSDFVoxel>(z);
             for (int y = 0; y < gridResolution.y(); ++y) {
                 for (int x = 0; x < gridResolution.x(); ++x) {
-                    Vector3f voxelWorld = volumeOrigin + Vector3i(x, y, z).cast<float>() * voxelSize;
+                    Vector3i voxelIndices(x, y, z);
+                    Vector3f voxelWorld = volumeOrigin + voxelIndices.cast<float>() * voxelSize;
 
                     float tsdf = frameData.tsdfValueAt(voxelWorld);
 
@@ -49,8 +43,7 @@ public:
                         continue;
                     }
 
-                    TSDFVoxel &voxel = slice[y * gridResolution.x() + x];
-
+                    TSDFVoxel &voxel = voxelGrid[flattenVoxelIndex(voxelIndices)];
 
                     if (voxel.sdf == MINF) {
                         // Initialize voxel with the first valid value pair
@@ -159,7 +152,7 @@ private:
             return false;
         }
 
-        TSDFVoxel voxel = getVoxel(p);
+        TSDFVoxel voxel = voxelGrid[flattenVoxelIndex(getVoxelIndices(p))];
 
         float sdf = voxel.sdf;
         float step = (sdf > TRUNCATION_RADIUS) ? TRUNCATION_RADIUS : std::max(sdf, voxelSize);
@@ -175,7 +168,7 @@ private:
                 return false;
             }
 
-            voxel = getVoxel(p);
+            voxel = voxelGrid[flattenVoxelIndex(getVoxelIndices(p))];
             sdf = voxel.sdf;
 
             // Found intersection from inside to outside the surface, thus occluded by the object
@@ -219,12 +212,12 @@ private:
             return;
         }
 
-        float Fx1 = getVoxel(point + dx).sdf;
-        float Fx2 = getVoxel(point - dx).sdf;
-        float Fy1 = getVoxel(point + dy).sdf;
-        float Fy2 = getVoxel(point - dy).sdf;
-        float Fz1 = getVoxel(point + dz).sdf;
-        float Fz2 = getVoxel(point - dz).sdf;
+        float Fx1 = voxelGrid[flattenVoxelIndex(getVoxelIndices(point + dx))].sdf;
+        float Fx2 = voxelGrid[flattenVoxelIndex(getVoxelIndices(point - dx))].sdf;
+        float Fy1 = voxelGrid[flattenVoxelIndex(getVoxelIndices(point + dy))].sdf;
+        float Fy2 = voxelGrid[flattenVoxelIndex(getVoxelIndices(point - dy))].sdf;
+        float Fz1 = voxelGrid[flattenVoxelIndex(getVoxelIndices(point + dz))].sdf;
+        float Fz2 = voxelGrid[flattenVoxelIndex(getVoxelIndices(point - dz))].sdf;
 
         if (Fx1 == MINF || Fx2 == MINF || Fy1 == MINF || Fy2 == MINF || Fz1 == MINF || Fz2 == MINF) {
             return;
@@ -234,7 +227,11 @@ private:
         normal = {n.x(), n.y(), n.z(), 1.0f};
     }
 
-    TSDFVoxel getVoxel(const Vector3f &worldPoint) const {
+    size_t flattenVoxelIndex(const Vector3i &voxelIndices) const {
+        return voxelIndices.x() + voxelIndices.y() * gridResolution.x() + voxelIndices.z() * gridResolution.x() * gridResolution.y();
+    }
+
+    Vector3i getVoxelIndices(const Vector3f &worldPoint) const {
         Vector3f localPoint = worldPoint - volumeOrigin;
 
         Vector3i voxelIndices = (localPoint / voxelSize).array()
@@ -245,12 +242,7 @@ private:
                 .cwiseMin(gridResolution - Vector3i::Ones());
 
 
-        const int rowStride = gridResolution.x() * gridResolution.y();
-
-        int index = voxelIndices.z() * rowStride
-                    + voxelIndices.y() * gridResolution.x()
-                    + voxelIndices.x();
-        return voxelGrid.at<TSDFVoxel>(voxelIndices.z(), index % rowStride);
+        return voxelIndices;
     }
 
     float voxelSize;
@@ -258,7 +250,7 @@ private:
     Vector3i gridResolution;
     Vector3f volumeOrigin;
 
-    cv::Mat voxelGrid; // 3D grid of voxels, flattened into 2D
+    std::vector<TSDFVoxel> voxelGrid; // 3D grid of voxels, flattened into 1D
 
     cv::Mat vertexMap;
     cv::Mat normalMap;
