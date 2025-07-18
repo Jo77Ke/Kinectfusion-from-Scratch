@@ -16,20 +16,19 @@ public:
 
     FrameData(
             int frameNumber,
-            CameraSpecifications cameraSpecs,
+            const CameraSpecifications &cameraSpecs,
             cv::Mat &&depthMap,
             cv::Mat &&colorMap,
             const Matrix4f &groundTruthPose
     ) : frameNumber(frameNumber),
-        cameraSpecs(std::move(cameraSpecs)),
+        cameraSpecs(cameraSpecs),
         imageWidth(static_cast<int>(cameraSpecs.imageWidth)),
         imageHeight(static_cast<int>(cameraSpecs.imageHeight)),
         depthMap(std::move(depthMap)),
         colorMap(std::move(colorMap)),
         groundTruthPose(groundTruthPose) {
-        validityMap = cv::Mat(imageHeight, imageWidth, CV_8UC1);
-        validityMap.setTo(0, depthMap == MINF);
-        validityMap.setTo(1, depthMap != MINF);
+        validityMap = cv::Mat(imageHeight, imageWidth, CV_8UC1, cv::Scalar(0));
+        validityMap.setTo(1, this->depthMap != MINF);
     }
 
     int getFrameNumber() const { return frameNumber; }
@@ -71,7 +70,7 @@ public:
             const float *depthRow = depthMap.ptr<float>(v);
             const cv::Vec4b *colorRow = colorMap.ptr<cv::Vec4b>(v);
             Vertex *vertexRow = reinterpret_cast<Vertex *>(vertexMap.ptr(v));
-            uint8_t *maskRow = validityMap.ptr<uint8_t>(v);
+            uchar *maskRow = validityMap.ptr<uchar>(v);
             for (int u = 0; u < imageWidth; ++u) {
                 Vertex &vertex = vertexRow[u];
 
@@ -79,14 +78,12 @@ public:
                     // invalid depth value -> invalid vertex
                     vertex.position = Vector4f(MINF, MINF, MINF, MINF);
                     vertex.color = cv::Vec4b(0, 0, 0, 0);
-                    continue;
+                } else {
+                    Vector3f posInCameraSpace = cameraSpecs.intrinsicsInverse * depthRow[u]
+                                                * Vector3f(static_cast<float>(u), static_cast<float>(v), 1.0f);
+                    vertex.position = pose * posInCameraSpace.homogeneous();
+                    vertex.color = colorRow[u];
                 }
-
-                Vector3f posInCameraSpace = cameraSpecs.intrinsicsInverse * depthRow[u]
-                                            * Vector3f(static_cast<float>(u), static_cast<float>(v), 1.0f);
-                vertex.position = pose * posInCameraSpace.homogeneous();
-                vertex.color = colorRow[u];
-
             }
         }
     }
@@ -102,38 +99,37 @@ public:
         for (int v = 0; v < imageHeight - 1; ++v) {
             const cv::Vec4f *vertexRow = vertexMap.ptr<cv::Vec4f>(v);
             const cv::Vec4f *vertexRowBelow = vertexMap.ptr<cv::Vec4f>(v + 1);
-            const uint8_t *maskRow = validityMap.ptr<uint8_t>(v);
-            const uint8_t *maskRowBelow = validityMap.ptr<uint8_t>(v + 1);
+            const uchar *maskRow = validityMap.ptr<uchar>(v);
+            const uchar *maskRowBelow = validityMap.ptr<uchar>(v + 1);
 
             cv::Vec4f *normalRow = normalMap.ptr<cv::Vec4f>(v);
             for (int u = 0; u < imageWidth - 1; ++u) {
                 if (maskRow[u] == 0 || maskRow[u + 1] == 0 || maskRowBelow[u] == 0) {
                     // at least one point invalid -> normal vector invalid
                     normalRow[u] = cv::Vec4f(MINF, MINF, MINF, MINF);
-                    continue;
+                } else {
+                    const Vector3f vertex(
+                            vertexRow[u][0],
+                            vertexRow[u][1],
+                            vertexRow[u][2]
+                    );
+                    const Vector3f vertexRight(
+                            vertexRow[u + 1][0],
+                            vertexRow[u + 1][1],
+                            vertexRow[u + 1][2]
+                    );
+                    const Vector3f vertexBelow(
+                            vertexRowBelow[u][0],
+                            vertexRowBelow[u][1],
+                            vertexRowBelow[u][2]
+                    );
+
+                    Vector3f du = vertexRight - vertex; // du = V(u+1, v) - V(u,v)
+                    Vector3f dv = vertexBelow - vertex; // dv = V(u, v+1) - V(u,v)
+
+                    Vector3f n = du.cross(dv).normalized();
+                    normalRow[u] = cv::Vec4f(n.x(), n.y(), n.z(), 1.0f);
                 }
-
-                const Vector3f vertex(
-                        vertexRow[u][0],
-                        vertexRow[u][1],
-                        vertexRow[u][2]
-                );
-                const Vector3f vertexRight(
-                        vertexRow[u + 1][0],
-                        vertexRow[u + 1][1],
-                        vertexRow[u + 1][2]
-                );
-                const Vector3f vertexBelow(
-                        vertexRowBelow[u][0],
-                        vertexRowBelow[u][1],
-                        vertexRowBelow[u][2]
-                );
-
-                Vector3f du = vertexRight - vertex; // du = V(u+1, v) - V(u,v)
-                Vector3f dv = vertexBelow - vertex; // dv = V(u, v+1) - V(u,v)
-
-                Vector3f n = du.cross(dv).normalized();
-                normalRow[u] = cv::Vec4f(n.x(), n.y(), n.z(), 1.0f);
             }
         }
     }
@@ -154,13 +150,12 @@ public:
         Vector3f projectedPoint = cameraSpecs.intrinsics * pointInCameraSpace;
         projectedPoint /= projectedPoint.z();
 
+        const Vector3i pixel = projectedPoint.cast<int>(); // Nearest neighbor projection via rounding down
         // Check if within image bounds
-        if (projectedPoint.x() < 0 || projectedPoint.x() >= static_cast<float>(imageWidth) ||
-            projectedPoint.y() < 0 || projectedPoint.y() >= static_cast<float>(imageHeight)) {
+        if (pixel.x() < 0 || pixel.x() >= imageWidth ||
+            pixel.y() < 0 || pixel.y() >= imageHeight) {
             return MINF;
         }
-
-        const Vector3i pixel = projectedPoint.cast<int>(); // Nearest neighbor projection via rounding down
 
         const float depthValue = depthMap.at<float>(pixel.y(), pixel.x());
         // Check if depth value is valid
@@ -203,7 +198,7 @@ private:
     Matrix4f groundTruthPose;
 
     cv::Mat vertexMap;
-    cv::Mat validityMap;
+    cv::Mat validityMap; // 1 for valid pixels, 0 for invalid
     cv::Mat normalMap;
 
     Vector3f cameraCenterInGlobalSpace;
