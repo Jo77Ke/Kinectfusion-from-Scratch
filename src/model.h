@@ -87,11 +87,14 @@ public:
                 Vector3f pixel(static_cast<float>(u), static_cast<float>(v), 1.0f);
                 Vector3f rayDirection = Rcw * (cameraSpecs.intrinsicsInverse * pixel).normalized();
 
-                castRay(
-                        cameraOrigin, rayDirection,
-                        vertexRow[u],
+                Vertex intersection;
+                if (castRay(
+                        cameraOrigin, rayDirection, intersection,
                         cameraSpecs.minDepthRange, cameraSpecs.maxDepthRange
-                );
+                )) {
+                    vertexRow[u].position = intersection.position;
+                    vertexRow[u].color = intersection.color;
+                }
 
                 computeNormalFromTSDF(vertexRow[u].position.head<3>(), normalRow[u]);
             }
@@ -130,15 +133,18 @@ private:
     }
 
     bool isInBounds(const Vector3f &worldPoint) const {
-        Vector3f local_point = worldPoint - volumeOrigin;
-        return (local_point.x() >= 0 && local_point.x() < volumeSize.x() &&
-                local_point.y() >= 0 && local_point.y() < volumeSize.y() &&
-                local_point.z() >= 0 && local_point.z() < volumeSize.z());
+        if (worldPoint.x() == MINF ||
+            worldPoint.y() == MINF ||
+            worldPoint.z() == MINF) {
+            return false; // Point is invalid
+        }
+
+        const size_t voxelIndex = flattenVoxelIndex(getVoxelIndices(worldPoint));
+        return 0 <= voxelIndex && voxelIndex < voxelGrid.size();
     }
 
     bool castRay(
-            const Vector3f &origin, const Vector3f &direction,
-            Vertex &intersectionVertex,
+            const Vector3f &origin, const Vector3f &direction, Vertex &intersectionVertex,
             const float tMin, const float tMax
     ) const {
         // Default result to invalid
@@ -180,6 +186,7 @@ private:
             if (sdf != MINF && sdf <= 0.0f && prevSDF >= 0.0f) {
                 float tInterpolated = t - step * prevSDF / (prevSDF - sdf);
                 intersectionVertex.position = (origin + tInterpolated * direction).homogeneous();
+                intersectionVertex.color = cv::Vec4b(255, 255, 255, 255); // Default color for intersection
 //                intersectionVertex.color = voxel.color;
                 return true;
             }
@@ -228,7 +235,8 @@ private:
     }
 
     size_t flattenVoxelIndex(const Vector3i &voxelIndices) const {
-        return voxelIndices.x() + voxelIndices.y() * gridResolution.x() + voxelIndices.z() * gridResolution.x() * gridResolution.y();
+        return voxelIndices.x() + voxelIndices.y() * gridResolution.x() +
+               voxelIndices.z() * gridResolution.x() * gridResolution.y();
     }
 
     Vector3i getVoxelIndices(const Vector3f &worldPoint) const {
