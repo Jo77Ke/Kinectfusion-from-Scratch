@@ -7,12 +7,13 @@
 
 void buildDepthPyramid(
         int levels, const float sigma_s, float sigma_r,
-        std::vector<cv::Mat> depthPyramid,
+        std::vector<cv::Mat> &depthPyramid,
         const cv::Mat &rawDepthMap
 ) {
     depthPyramid.clear();
     depthPyramid.resize(levels);
 
+    depthPyramid[0] = cv::Mat(rawDepthMap.size(), CV_32FC1);
     // Level 0 = filtered depth map
     bilateralFilter(rawDepthMap, depthPyramid[0], sigma_s, sigma_r);
 
@@ -22,7 +23,6 @@ void buildDepthPyramid(
         const int h = prev.rows / 2;
 
         cv::Mat current = cv::Mat::zeros(h, w, CV_32F);
-
 #pragma omp parallel for
         for (int y = 0; y < h; ++y) {
             for (int x = 0; x < w; ++x) {
@@ -57,7 +57,7 @@ void buildDepthPyramid(
 void buildVertexPyramid(
         const std::vector<cv::Mat> &depthPyramid,
         const CameraSpecifications &cameraSpecs,
-        std::vector<cv::Mat> vertexPyramid
+        std::vector<cv::Mat> &vertexPyramid
 ) {
     vertexPyramid.clear();
     vertexPyramid.resize(depthPyramid.size());
@@ -88,7 +88,7 @@ void buildVertexPyramid(
 
 void buildNormalPyramid(
         const std::vector<cv::Mat> &vertexPyramid,
-        std::vector<cv::Mat> normalPyramid
+        std::vector<cv::Mat> &normalPyramid
 ) {
     normalPyramid.clear();
     normalPyramid.resize(vertexPyramid.size());
