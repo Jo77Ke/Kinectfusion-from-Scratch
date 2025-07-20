@@ -1,4 +1,6 @@
 #include <iostream>
+#include <sstream>
+#include <limits>
 
 #include "rgbd_frame_stream.h"
 #include "model.h"
@@ -14,8 +16,8 @@ constexpr float SIGMA_R = 0.1f; // controls allowed depth difference: the larger
 constexpr int LEVELS = 3;
 
 // TSDF volumetric fusion
-constexpr float TSDF_VOXEL_SIZE = 0.005; // in m
-const Vector3f TSDF_VOLUME_SIZE(5.0, 5.0, 5.0); // in m
+constexpr float TSDF_VOXEL_SIZE = 0.02f;
+const Vector3f TSDF_VOLUME_SIZE(5.12, 5.12, 5.12);// in m
 
 // Pose estimation
 const std::vector<int> MAX_ITERATIONS_PER_LEVEL = {10, 5, 4}; // corresponding to the levels 3, 2, 1
@@ -75,6 +77,22 @@ int main() {
         FrameData frameData = stream.processNextFrame();
         cameraSpecs = frameData.getCameraSpecifications();
 
+        // --- DEBUGGING ---
+        std::cout << "\n--- Debugging Raw Depth Map for Current Frame (" << stream.getCurrentFrameIndex() << ") ---" << std::endl;
+        const cv::Mat& rawDepth = frameData.getRawDepthMap();
+        std::cout << "Raw Depth Map size: " << rawDepth.cols << "x" << rawDepth.rows << ", type: " << rawDepth.type() << std::endl;
+        std::cout << "First 5x5 pixels of Raw Depth Map:" << std::endl;
+        for (int i = 0; i < std::min(5, rawDepth.rows); ++i) {
+            const float* rowPtr = rawDepth.ptr<const float>(i);
+            for (int j = 0; j < std::min(5, rawDepth.cols); ++j) {
+                std::cout << "(" << i << "," << j << "): " << rowPtr[j] << " | ";
+            }
+            std::cout << std::endl;
+        }
+        std::cout << "--- End Debugging Raw Depth Map ---" << std::endl;
+        // --- END DEBUGGING ---
+
+
         // Filter and subsample raw data
         frameData.buildPyramids(LEVELS, SIGMA_S, SIGMA_R);
         std::cout << "Build pyramids for current frame" << std::endl;
@@ -90,6 +108,42 @@ int main() {
             const auto &frameVertexMap = frameData.getVertexPyramidAtLevel(level);
             const auto &modelVertexMap = model.getVertexPyramidAtLevel(level);
             const auto &modelNormalMap = model.getNormalPyramidAtLevel(level);
+
+            // --- DEBUGGING  ---
+            std::cout << "\n--- Debugging ICP Inputs for Level " << level << " ---" << std::endl;
+            std::cout << "Frame Vertex Map (Level " << level << ") size: " << frameVertexMap.cols << "x" << frameVertexMap.rows << ", type: " << frameVertexMap.type() << std::endl;
+            std::cout << "Model Vertex Map (Level " << level << ") size: " << modelVertexMap.cols << "x" << modelVertexMap.rows << ", type: " << modelVertexMap.type() << std::endl;
+            std::cout << "Model Normal Map (Level " << level << ") size: " << modelNormalMap.cols << "x" << modelNormalMap.rows << ", type: " << modelNormalMap.type() << std::endl;
+
+            std::cout << "First 5 pixels of Frame Vertex Map (Level " << level << "):" << std::endl;
+            for (int i = 0; i < std::min(5, frameVertexMap.rows); ++i) {
+                const cv::Vec4f* rowPtr = frameVertexMap.ptr<const cv::Vec4f>(i);
+                for (int j = 0; j < std::min(5, frameVertexMap.cols); ++j) {
+                    std::cout << "(" << i << "," << j << "): " << rowPtr[j] << " | ";
+                }
+                std::cout << std::endl;
+            }
+
+            std::cout << "First 5 pixels of Model Vertex Map (Level " << level << "):" << std::endl;
+            for (int i = 0; i < std::min(5, modelVertexMap.rows); ++i) {
+                const cv::Vec4f* rowPtr = modelVertexMap.ptr<const cv::Vec4f>(i);
+                for (int j = 0; j < std::min(5, modelVertexMap.cols); ++j) {
+                    std::cout << "(" << i << "," << j << "): " << rowPtr[j] << " | ";
+                }
+                std::cout << std::endl;
+            }
+
+            std::cout << "First 5 pixels of Model Normal Map (Level " << level << "):" << std::endl;
+            for (int i = 0; i < std::min(5, modelNormalMap.rows); ++i) {
+                const cv::Vec4f* rowPtr = modelNormalMap.ptr<const cv::Vec4f>(i);
+                for (int j = 0; j < std::min(5, modelNormalMap.cols); ++j) {
+                    std::cout << "(" << i << "," << j << "): " << rowPtr[j] << " | ";
+                }
+                std::cout << std::endl;
+            }
+            std::cout << "--- End Debugging ICP Inputs ---" << std::endl;
+            // --- END DEBUGGING
+
 
             const IcpParameters icpParams(MAX_ITERATIONS_PER_LEVEL[level], TERMINATION_THRESHOLD,
                                           MAX_CORRESPONDENCE_DISTANCE);

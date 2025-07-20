@@ -1,5 +1,6 @@
 #pragma once
 
+#include <iostream>
 #include <utility>
 #include <numeric>
 
@@ -135,6 +136,7 @@ public:
     }
 
     void buildPyramids(int levels, float sigmaS, float sigmaR) {
+        std::cout << "frame_data.h buildPyramids" << std::endl;
         buildDepthPyramid(levels, sigmaS, sigmaR, depthPyramid, depthMap);
         buildVertexPyramid(depthPyramid, cameraSpecs, vertexPyramid);
         buildNormalPyramid(vertexPyramid, normalPyramid);
@@ -145,44 +147,37 @@ public:
     }
 
     float tsdfValueAt(const Vector3f &globalPoint) const {
-        const Vector3f pointInCameraSpace = pose.topLeftCorner<3, 4>() * globalPoint.homogeneous();
+        // Transform the 3D point from global space to the camera's local space
+        const Vector3f pointInCameraSpace = (pose.inverse().eval()).topLeftCorner<3, 4>() * globalPoint.homogeneous();
 
+        // Ignore voxels that are behind the camera
+        if (pointInCameraSpace.z() <= 0) {
+            return MINF;
+        }
+
+        // Project the 3D point into the 2D image plane
         Vector3f projectedPoint = cameraSpecs.intrinsics * pointInCameraSpace;
-        projectedPoint /= projectedPoint.z();
+        const Vector2i pixel(round(projectedPoint.x() / projectedPoint.z()),
+                             round(projectedPoint.y() / projectedPoint.z()));
 
-        const Vector3i pixel = projectedPoint.cast<int>(); // Nearest neighbor projection via rounding down
-        // Check if within image bounds
-        if (pixel.x() < 0 || pixel.x() >= imageWidth ||
-            pixel.y() < 0 || pixel.y() >= imageHeight) {
+        // Ignore voxels that project outside the image bounds
+        if (pixel.x() < 0 || pixel.x() >= imageWidth || pixel.y() < 0 || pixel.y() >= imageHeight) {
             return MINF;
         }
 
-        const float depthValue = depthMap.at<float>(pixel.y(), pixel.x());
-        // Check if depth value is valid
-        if (depthValue == MINF) {
+        // Get the measured depth from the depth map at the projected pixel
+        const float measuredDepth = depthMap.at<float>(pixel.y(), pixel.x());
+
+        // Ignore pixels with invalid depth measurements
+        if (measuredDepth <= 0.0f || measuredDepth == MINF) {
             return MINF;
         }
 
-        const float normalizationFactor = (cameraSpecs.intrinsicsInverse * pixel.cast<float>()).norm();
-        // Check if normalization factor is valid
-        if (normalizationFactor == 0.0f) {
-            return MINF;
-        }
+        // Calculate the difference between the measured depth and the point's actual depth
+        const float sdf = measuredDepth - pointInCameraSpace.z();
 
-        const float rayDepth = (cameraCenterInGlobalSpace - globalPoint).norm() / normalizationFactor;
-        // Check if ray depth is valid
-        if (rayDepth < 0.0f) {
-            return MINF;
-        }
-
-        const float deltaDepth = rayDepth - depthValue;
-        const float absoluteDeltaDepth = std::abs(deltaDepth);
-        // Truncate points that are too far away from the surface
-        if (absoluteDeltaDepth > TRUNCATION_RADIUS) {
-            return MINF;
-        }
-
-        return std::min(1.0f, absoluteDeltaDepth / TRUNCATION_RADIUS) * static_cast<float>(sgn(deltaDepth));
+        // TRUNCATE the signed distance and scale it to be between -1.0 and 1.0.
+        return std::max(-1.0f, std::min(1.0f, sdf / TRUNCATION_RADIUS));
     }
 
 private:

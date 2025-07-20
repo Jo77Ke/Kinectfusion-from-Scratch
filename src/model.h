@@ -86,6 +86,7 @@ public:
         for (int v = 0; v < imageHeight; ++v) {
             Vertex *vertexRow = reinterpret_cast<Vertex *>(vertexMap.ptr(v));
             cv::Vec4f *normalRow = normalMap.ptr<cv::Vec4f>(v);
+
             for (int u = 0; u < imageWidth; ++u) {
                 Vector3f pixel(static_cast<float>(u), static_cast<float>(v), 1.0f);
                 Vector3f rayDirection = Rcw * (cameraSpecs.intrinsicsInverse * pixel).normalized();
@@ -97,15 +98,37 @@ public:
                 )) {
                     vertexRow[u].position = intersection.position;
                     vertexRow[u].color = intersection.color;
+                } else {
+                    vertexRow[u].position = Vector4f(MINF, MINF, MINF, MINF);
+                    vertexRow[u].color = cv::Vec4b(0, 0, 0, 0);
                 }
 
                 computeNormalFromTSDF(vertexRow[u].position.head<3>(), normalRow[u]);
             }
         }
+
+        vertexMapForPyramid = cv::Mat(imageHeight, imageWidth, CV_32FC4);
+
+#pragma omp parallel for schedule(dynamic) 
+        for (int v = 0; v < imageHeight; ++v) {
+            const Vertex *srcVertexRow = reinterpret_cast<const Vertex *>(vertexMap.ptr(v));
+            cv::Vec4f *dstVertexRow = vertexMapForPyramid.ptr<cv::Vec4f>(v);
+            for (int u = 0; u < imageWidth; ++u) {
+                const Vector4f& pos4 = srcVertexRow[u].position;
+                const Vector3f pos = pos4.head<3>();
+                if (pos.x() == MINF) {
+                    dstVertexRow[u] = cv::Vec4f(MINF, MINF, MINF, MINF);
+                } else {
+                    dstVertexRow[u] = cv::Vec4f(pos.x(), pos.y(), pos.z(), 1.0f);
+                }
+            }
+        }
+
     }
 
     void buildPyramids(const int levels, const float sigma_r) {
-        buildVertexPyramidFromVertexMap(levels, sigma_r, vertexMap, vertexPyramid);
+        std::cout << "model.h buildPyramids" << std::endl;;
+        buildVertexPyramidFromVertexMap(levels, sigma_r, vertexMapForPyramid, vertexPyramid);
         buildNormalPyramid(vertexPyramid, normalPyramid);
         normalPyramid[0] = normalMap; // Use the original normal map as the first level of the pyramid
     }
@@ -116,6 +139,10 @@ public:
 
     const cv::Mat &getNormalMap() const {
         return normalMap;
+    }
+
+    const cv::Mat &getVertexMapForPyramid() const {
+        return vertexMapForPyramid;
     }
 
     const cv::Mat &getVertexPyramidAtLevel(int level) const {
@@ -164,7 +191,8 @@ private:
         TSDFVoxel voxel = voxelGrid[flattenVoxelIndex(getVoxelIndices(p))];
 
         float sdf = voxel.sdf;
-        float step = (sdf > TRUNCATION_RADIUS) ? TRUNCATION_RADIUS : std::max(sdf, voxelSize);
+        float sdf_metric = sdf * TRUNCATION_RADIUS;
+        float step = std::max(sdf_metric, voxelSize);
         t += step;
         float prevSDF = sdf;
 
@@ -195,7 +223,8 @@ private:
             }
 
             // Set step size based on the truncated SDF value while ensuring to land in a new voxel
-            step = (sdf > TRUNCATION_RADIUS) ? TRUNCATION_RADIUS : std::max(sdf, voxelSize);
+            sdf_metric = sdf * TRUNCATION_RADIUS;
+            step = std::max(sdf_metric, voxelSize);
             t += step;
             prevSDF = sdf;
         }
@@ -265,6 +294,7 @@ private:
 
     cv::Mat vertexMap;
     cv::Mat normalMap;
+    cv::Mat vertexMapForPyramid;
 
     std::vector<cv::Mat> vertexPyramid;
     std::vector<cv::Mat> normalPyramid;

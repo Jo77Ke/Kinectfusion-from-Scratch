@@ -3,7 +3,8 @@
 #include "utils.h"
 #include "frame_data.h"
 #include "bilateral_filter.h"
-#include "sub_sampling.h"
+#include "camera_specs.h"
+
 
 void buildDepthPyramid(
         int levels, const float sigma_s, float sigma_r,
@@ -33,7 +34,11 @@ void buildDepthPyramid(
 
                 for (int dy = 0; dy <= 1; ++dy) {
                     for (int dx = 0; dx <= 1; ++dx) {
-                        float val = prev.at<float>(y * 2 + dy, x * 2 + dx);
+                        int yy = y * 2 + dy;
+                        int xx = x * 2 + dx;
+                        if (yy >= prev.rows || xx >= prev.cols) continue;
+
+                        float val = prev.at<float>(yy, xx);
                         if (val != MINF && std::abs(val - center) <= 3.0f * sigma_r) {
                             validValues.push_back(val);
                         }
@@ -49,7 +54,6 @@ void buildDepthPyramid(
                 }
             }
         }
-
         depthPyramid[l] = current;
     }
 }
@@ -77,11 +81,20 @@ void buildVertexPyramid(
                     continue;
                 }
 
-                Vector3f pos = cameraSpecs.intrinsicsInverse * d * Vector2i(u, v).cast<float>().homogeneous();
+                Vector3f pixel_hom(static_cast<float>(u), static_cast<float>(v), 1.0f);
+                Vector3f pos = cameraSpecs.intrinsicsInverse * (d * pixel_hom);
+
+                // --- DEBUGGING ---
+                if (pos.array().isNaN().any() || pos.array().isInf().any() || pos.norm() < 1e-9) {
+                    // std::cerr << "DEBUG: buildVertexPyramid: Invalid pos at (u,v)=(" << u << "," << v << "), depth=" << d << ". Pos: " << pos.transpose() << std::endl;
+                    vertexMapLevel.at<cv::Vec4f>(v, u) = cv::Vec4f(MINF, MINF, MINF, MINF);
+                    continue;
+                }
+                // --- END DEBUGGING ---
+
                 vertexMapLevel.at<cv::Vec4f>(v, u) = cv::Vec4f(pos.x(), pos.y(), pos.z(), 1.0f);
             }
         }
-
         vertexPyramid[l] = vertexMapLevel;
     }
 }
@@ -115,16 +128,22 @@ void buildNormalPyramid(
                 Vector3f du = Vector3f(right[0], right[1], right[2]) - Vector3f(center[0], center[1], center[2]);
                 Vector3f dv = Vector3f(down[0], down[1], down[2]) - Vector3f(center[0], center[1], center[2]);
 
-                Vector3f n = du.cross(dv).normalized();
+                Vector3f n = du.cross(dv);
+                if (n.norm() < 1e-6) {
+                    normalMap.at<cv::Vec4f>(v, u) = cv::Vec4f(MINF, MINF, MINF, MINF);
+                    continue;
+                }
+                n.normalize();
+
                 normalMap.at<cv::Vec4f>(v, u) = cv::Vec4f(n.x(), n.y(), n.z(), 1.0f);
             }
         }
-
         normalPyramid[l] = normalMap;
     }
 }
 
 void buildVertexPyramidFromVertexMap(int levels, float sigma_r,  const cv::Mat &vertexMap, std::vector<cv::Mat> &vertexPyramid) {
+    std::cout << "sub_sampling.h buildVertexPyramidFromVertexMap" << std::endl;
     vertexPyramid.clear();
     vertexPyramid.resize(levels);
 
@@ -171,7 +190,9 @@ void buildVertexPyramidFromVertexMap(int levels, float sigma_r,  const cv::Mat &
                 }
             }
         }
-
+        // std::cout << current << std::endl; // Commented out to reduce verbose output
         vertexPyramid[l] = current;
     }
+
+    std::cout << "sub_sampling.h buildVertexPyramidFromVertexMap END" << std::endl;
 }

@@ -6,6 +6,8 @@
 #include <fstream>
 #include <iostream>
 #include <filesystem>
+#include <numeric>
+#include <limits>
 
 namespace fs = std::filesystem;
 
@@ -42,122 +44,134 @@ public:
                 intrinsics
         );
 
-
-        // Reset index
-        currentFrameIndex = -1;
+        std::cout << "RGBDFrameStream initialized with " << numberOfFrames << " frames." << std::endl;
         return true;
     }
 
     FrameData processNextFrame() {
-        currentFrameIndex = currentFrameIndex == -1 ? 0 : currentFrameIndex + frameStride;
-        if ((unsigned int) currentFrameIndex >= numberOfFrames) throw std::runtime_error("No more frames available");
+        currentFrameIndex += frameStride;
+        if (currentFrameIndex >= numberOfFrames) {
+            throw std::runtime_error("No more frames to process.");
+        }
 
-        std::cout << "Processing frame [" << currentFrameIndex << " | " << numberOfFrames << "]" << std::endl;
-        return {
+        // Load depth map
+        fs::path depthPath = baseDirectory / filenamesDepthImages[currentFrameIndex];
+        cv::Mat loadedDepthMap = cv::imread(depthPath.string(), cv::IMREAD_UNCHANGED);
+
+        if (loadedDepthMap.empty()) {
+            std::cerr << "ERROR: Failed to load depth map: " << depthPath << std::endl;
+            currentDepthMap = cv::Mat(cameraSpecifications.imageHeight, cameraSpecifications.imageWidth, CV_32FC1, cv::Scalar(MINF));
+        } else {
+            currentDepthMap.create(cameraSpecifications.imageHeight, cameraSpecifications.imageWidth, CV_32FC1);
+
+            if (loadedDepthMap.type() == CV_16UC1) { // Typical for TUM datasets (depth in mm, unsigned short)
+                for (int r = 0; r < loadedDepthMap.rows; ++r) {
+                    const ushort* srow = loadedDepthMap.ptr<ushort>(r);
+                    float* drow = currentDepthMap.ptr<float>(r);
+                    for (int c = 0; c < loadedDepthMap.cols; ++c) {
+                        ushort depth_val_mm = srow[c];
+                        if (depth_val_mm == 0) { // 0 indicates invalid depth in TUM datasets
+                            drow[c] = MINF;
+                        } else {
+                            drow[c] = static_cast<float>(depth_val_mm) / 5000.0f; // Convert mm to meters (5000 for Kinect v1)
+                        }
+                    }
+                }
+            } else if (loadedDepthMap.type() == CV_32FC1) { // If already float, copy it and ensure 0s are MINF
+                loadedDepthMap.copyTo(currentDepthMap); // Use copyTo to ensure deep copy
+                currentDepthMap.setTo(MINF, currentDepthMap == 0.0f);
+            } else {
+                std::cerr << "WARNING: Unexpected depth map type: " << loadedDepthMap.type() << " for " << depthPath << ". Attempting generic conversion to CV_32FC1." << std::endl;
+                loadedDepthMap.convertTo(currentDepthMap, CV_32FC1);
+                currentDepthMap.setTo(MINF, currentDepthMap == 0.0f); // Set exact zeros to MINF after conversion
+            }
+
+            double minVal, maxVal;
+            cv::minMaxLoc(currentDepthMap, &minVal, &maxVal);
+            std::cout << "Loaded & Processed Depth Map " << depthPath.filename() << ": Type=" << currentDepthMap.type()
+                      << ", Dims=" << currentDepthMap.cols << "x" << currentDepthMap.rows
+                      << ", Min=" << minVal << ", Max=" << maxVal << std::endl;
+
+            if (minVal == MINF && maxVal == MINF) {
+                std::cerr << "WARNING: Processed depth map is entirely MINF! Data issue suspected." << std::endl;
+            }
+        }
+
+        fs::path colorPath = baseDirectory / filenamesColorImages[currentFrameIndex];
+        currentColorMap = cv::imread(colorPath.string(), cv::IMREAD_COLOR);
+        if (currentColorMap.empty()) {
+            std::cerr << "ERROR: Failed to load color map: " << colorPath << std::endl;
+            currentColorMap = cv::Mat(cameraSpecifications.imageHeight, cameraSpecifications.imageWidth, CV_8UC3, cv::Scalar(0, 0, 0));
+        }
+        cv::cvtColor(currentColorMap, currentColorMap, cv::COLOR_BGR2RGBA);
+
+        currentTrajectory = findClosestTrajectory();
+
+        return FrameData(
                 currentFrameIndex,
                 cameraSpecifications,
-                loadDepthMap(),
-                loadColorMap(),
-                findClosestTrajectory()
-        };
-    }
-
-    unsigned int getCurrentFrameIndex() const {
-        return currentFrameIndex;
+                std::move(currentDepthMap),
+                std::move(currentColorMap),
+                currentTrajectory
+        );
     }
 
     bool hasNextFrame() const {
-        return currentFrameIndex == -1 && numberOfFrames > 0 || (unsigned int) currentFrameIndex + frameStride <= numberOfFrames;
+        return (currentFrameIndex + frameStride) < numberOfFrames;
+    }
+
+    int getCurrentFrameIndex() const {
+        return currentFrameIndex;
     }
 
 private:
-    static bool readFileList(
-            const fs::path &pathToFilenameList,
-            std::vector<std::string> &filenames,
-            std::vector<double> &timestamps
-    ) {
-        std::ifstream fileDepthList(pathToFilenameList, std::ios::in);
-        if (!fileDepthList.is_open()) return false;
-
-        filenames.clear();
-        timestamps.clear();
-
+    bool readFileList(const fs::path &filepath, std::vector<std::string> &filenames, std::vector<double> &timestamps) {
+        std::ifstream file(filepath);
+        if (!file.is_open()) {
+            std::cerr << "ERROR: Could not open file: " << filepath << std::endl;
+            return false;
+        }
         std::string line;
-        while (fileDepthList.good() && std::getline(fileDepthList, line)) {
+        while (std::getline(file, line)) {
             if (line.empty() || line[0] == '#') continue; // Skip comments and empty lines
-
-            std::istringstream ss(line);
+            std::stringstream ss(line);
             double timestamp;
             std::string filename;
-
             ss >> timestamp >> filename;
-            if (filename.empty()) break;
-
             timestamps.push_back(timestamp);
             filenames.push_back(filename);
         }
-        fileDepthList.close();
+        std::cout << "Read " << filenames.size() << " entries from " << filepath.filename() << std::endl;
         return true;
     }
 
-    bool readTrajectoryFile(const std::string &filename) {
-        std::ifstream file(filename);
-        if (!file.is_open()) return false;
-
-        trajectory.clear();
+    bool readTrajectoryFile(const fs::path &filepath) {
+        std::ifstream file(filepath);
+        if (!file.is_open()) {
+            std::cerr << "ERROR: Could not open trajectory file: " << filepath << std::endl;
+            return false;
+        }
         std::string line;
-        while (file.good() && std::getline(file, line)) {
+        while (std::getline(file, line)) {
             if (line.empty() || line[0] == '#') continue; // Skip comments and empty lines
-
-            std::istringstream ss(line);
+            std::stringstream ss(line);
             double timestamp;
             float tx, ty, tz, qx, qy, qz, qw;
             ss >> timestamp >> tx >> ty >> tz >> qx >> qy >> qz >> qw;
 
+            // Convert quaternion to rotation matrix
             Eigen::Quaternionf q(qw, qx, qy, qz);
-            if (q.norm() == 0) {
-                std::cerr << "Invalid quaternion in trajectory file: " << line << std::endl;
-            }
+            Eigen::Matrix3f R = q.normalized().toRotationMatrix();
 
-            Eigen::Matrix4f transformation = Eigen::Matrix4f::Identity();
-            transformation.block<3, 3>(0, 0) = q.toRotationMatrix();
-            transformation.block<3, 1>(0, 3) = Eigen::Vector3f(tx, ty, tz);
-            transformation = transformation.inverse().eval(); // Invert to camera pose
+            // Create 4x4 transformation matrix
+            Eigen::Matrix4f T = Eigen::Matrix4f::Identity();
+            T.block<3, 3>(0, 0) = R;
+            T.block<3, 1>(0, 3) = Eigen::Vector3f(tx, ty, tz);
 
-            trajectory.emplace_back(timestamp, transformation);
+            trajectory.emplace_back(timestamp, T);
         }
+        std::cout << "Read " << trajectory.size() << " trajectory entries from " << filepath.filename() << std::endl;
         return true;
-    }
-
-    cv::Mat loadDepthMap() {
-        const auto depthFilename = baseDirectory / filenamesDepthImages[currentFrameIndex];
-        cv::Mat rawDepthMap = cv::imread(depthFilename, cv::IMREAD_UNCHANGED);
-        if (rawDepthMap.empty()) {
-            throw std::runtime_error("Empty depth image: " + depthFilename.string());
-        }
-        if (rawDepthMap.type() != CV_16UC1) {
-            throw std::runtime_error("Invalid depth format in: " + depthFilename.string());
-        }
-
-        // Convert and scale depth map to meters (see https://vision.in.tum.de/data/datasets/rgbd-dataset/file_formats)
-        cv::Mat depthMap;
-        rawDepthMap.convertTo(depthMap, CV_32FC1, 1.0f / 5000.0f);
-        // Mark invalid depth values (0.0f)
-        depthMap.setTo(MINF, rawDepthMap == 0.0f);
-
-        return depthMap;
-    }
-
-    cv::Mat loadColorMap() {
-        const auto colorFilename = baseDirectory / filenamesColorImages[currentFrameIndex];
-        cv::Mat colorMap = cv::imread(colorFilename, cv::IMREAD_COLOR);
-        if (trajectory.empty()) {
-            throw std::runtime_error("No trajectory data available");
-        }
-
-        cv::cvtColor(colorMap, colorMap, cv::COLOR_BGR2RGBA); // Convert to RGBA format
-
-        return colorMap;
     }
 
     Matrix4f findClosestTrajectory() {

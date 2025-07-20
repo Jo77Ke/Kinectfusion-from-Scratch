@@ -8,14 +8,15 @@
 constexpr float TRIANGULATION_EDGE_THRESHOLD = 0.01f; // 1cm
 
 
-size_t computeFacesForRegion(
+void computeFacesForRegion(
         const cv::Mat &vertexMap,
         unsigned int imageWidth,
         int startRow, int endRow,
         float squaredEdgeThreshold,
         std::vector<std::tuple<unsigned int, unsigned int, unsigned int>>& faces
 ) {
-    size_t faceCount = 0;
+    // size_t faceCount = 0;
+
     for (int v = startRow; v < endRow; ++v) {
         const auto *verticesRow = reinterpret_cast<const Vertex *>(vertexMap.ptr(v));
         const auto *verticesRowBelow = reinterpret_cast<const Vertex *>(vertexMap.ptr(v + 1));
@@ -35,8 +36,8 @@ size_t computeFacesForRegion(
                 && (a.position - b.position).squaredNorm() < squaredEdgeThreshold
                 && (a.position - d.position).squaredNorm() < squaredEdgeThreshold
                 && (b.position - d.position).squaredNorm() < squaredEdgeThreshold) {
-                faces[faceCount] = {idxA, u + 1 + v * imageWidth, idxD};
-                ++faceCount;
+                faces.push_back({idxA, u + 1 + v * imageWidth, idxD});
+                // ++faceCount;
             }
 
             // Triangle ACD
@@ -44,13 +45,12 @@ size_t computeFacesForRegion(
                 && (a.position - c.position).squaredNorm() < squaredEdgeThreshold
                 && (a.position - d.position).squaredNorm() < squaredEdgeThreshold
                 && (c.position - d.position).squaredNorm() < squaredEdgeThreshold) {
-                faces[faceCount] = {idxA, u + (v + 1) * imageWidth, idxD};
-                ++faceCount;
+                faces.push_back({idxA, u + (v + 1) * imageWidth, idxD});
+                // ++faceCount;
             }
         }
     }
-
-    return faceCount;
+    // return faceCount;
 }
 
 
@@ -86,7 +86,7 @@ void writeMesh(
 
         std::vector<std::tuple<unsigned int, unsigned int, unsigned int> > localFaces;
         localFaces.reserve(2 * (imageWidth - 1) * (endRow - startRow));
-        const size_t localCount = computeFacesForRegion(vertexMap, imageWidth,
+        computeFacesForRegion(vertexMap, imageWidth,
                                                   startRow, endRow,
                                                   squaredEdgeThreshold,
                                                   localFaces);
@@ -94,7 +94,7 @@ void writeMesh(
 
 #pragma omp critical
         {
-            faces.insert(faces.end(), localFaces.begin(), localFaces.begin() + static_cast<int>(localCount));
+            faces.insert(faces.end(), localFaces.begin(), localFaces.end());
         }
     }
 
