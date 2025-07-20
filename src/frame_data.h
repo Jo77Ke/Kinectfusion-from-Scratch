@@ -176,12 +176,13 @@ public:
         }
 
         const float deltaDepth = rayDepth - depthValue;
-        // Truncate points that are too far away
-        if (deltaDepth < -TRUNCATION_RADIUS) {
+        const float absoluteDeltaDepth = std::abs(deltaDepth);
+        // Truncate points that are too far away from the surface
+        if (absoluteDeltaDepth > TRUNCATION_RADIUS) {
             return MINF;
         }
 
-        return std::min(1.0f, deltaDepth / TRUNCATION_RADIUS) * static_cast<float>(sgn(deltaDepth));
+        return std::min(1.0f, absoluteDeltaDepth / TRUNCATION_RADIUS) * static_cast<float>(sgn(deltaDepth));
     }
 
 private:
