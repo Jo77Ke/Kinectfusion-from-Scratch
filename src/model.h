@@ -21,6 +21,9 @@ public:
         size_t totalVoxels = gridResolution.x() * gridResolution.y() * gridResolution.z();
         voxelGrid.resize(totalVoxels);
 
+        std::cout << "Creating TSDF volume consisting of " << totalVoxels << " voxels which require "
+                  << 5 * totalVoxels << " bytes = " << 5L * totalVoxels / 1e9L << " GB" << std::endl;
+
         // Mark all voxels as invalid by default
 #pragma omp parallel for
         for (size_t i = 0; i < totalVoxels; ++i) {

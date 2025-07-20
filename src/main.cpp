@@ -14,8 +14,8 @@ constexpr float SIGMA_R = 0.1f; // controls allowed depth difference: the larger
 constexpr int LEVELS = 3;
 
 // TSDF volumetric fusion
-constexpr float TSDF_VOXEL_SIZE = 0.5; // in m
-const Vector3f TSDF_VOLUME_SIZE(512, 512, 512); // in m
+constexpr float TSDF_VOXEL_SIZE = 0.005; // in m
+const Vector3f TSDF_VOLUME_SIZE(5.0, 5.0, 5.0); // in m
 
 // Pose estimation
 const std::vector<int> MAX_ITERATIONS_PER_LEVEL = {10, 5, 4}; // corresponding to the levels 3, 2, 1
@@ -31,13 +31,6 @@ int main() {
     std::string outputDirectory = "./results/";
     std::string filenameBaseOut = "mesh_";
 
-    // Parameters
-
-    // Bilateral filtering
-    const float sigma_s = 3;
-    const float sigma_r = 0.1;
-
-
     // Load video
     std::cout << "Initialize frame stream..." << std::endl;
     RGBDFrameStream stream;
@@ -48,7 +41,6 @@ int main() {
     TSDFVolume model(TSDF_VOXEL_SIZE, TSDF_VOLUME_SIZE);
     std::cout << "Initialized model volume" << std::endl;
 
-
     FrameData firstFrame = stream.processNextFrame();
     CameraSpecifications cameraSpecs = firstFrame.getCameraSpecifications();
 
@@ -57,15 +49,17 @@ int main() {
     firstFrame.computeVertexMap();
     firstFrame.computeNormalMap();
     firstFrame.computeCameraCenterInGlobalSpace();
-
-    std::cout << "Prepared first frame" << std::endl;
+    std::cout << "Prepared first frame for integration" << std::endl;
 
     // Initialize the model with the first frame
     model.integrate(firstFrame);
-    Matrix4f previousPose = firstFrame.getPose();
+    std::cout << "Integrated first frame into model" << std::endl;
 
     // Predict current model surface and output as mesh
+    Matrix4f previousPose = firstFrame.getPose();
     model.predictSurface(cameraSpecs, previousPose);
+    std::cout << "Predicted model surface after the first frame" << std::endl;
+
     std::stringstream ss;
     ss << outputDirectory << filenameBaseOut << stream.getCurrentFrameIndex() << ".off";
     writeMesh(
@@ -74,6 +68,7 @@ int main() {
             cameraSpecs.imageWidth,
             cameraSpecs.imageHeight
     );
+    std::cout << "Wrote first mesh to " << ss.str() << std::endl;
 
     // Convert video to meshes
     while (stream.hasNextFrame()) {
@@ -82,12 +77,15 @@ int main() {
 
         // Filter and subsample raw data
         frameData.buildPyramids(LEVELS, SIGMA_S, SIGMA_R);
+        std::cout << "Build pyramids for current frame" << std::endl;
 
         // Subsample it
         model.buildPyramids(LEVELS, SIGMA_R);
+        std::cout << "BuilT pyramids for model" << std::endl;
 
         // Estimate pose
         Matrix4f newPose = previousPose;
+        std::cout << "Estimating pose..." << std::endl;
         for (int level = LEVELS - 1; level >= 0; --level) {
             const auto &frameVertexMap = frameData.getVertexPyramidAtLevel(level);
             const auto &modelVertexMap = model.getVertexPyramidAtLevel(level);
@@ -105,18 +103,23 @@ int main() {
                     icpParams
             );
         }
+        std::cout << "Pose estimation completed" << std::endl;
 
         frameData.setPose(newPose);
         frameData.computeVertexMap();
         frameData.computeNormalMap();
         frameData.computeCameraCenterInGlobalSpace();
+        std::cout << "Prepared current frame for integration" << std::endl;
 
         model.integrate(frameData);
+        std::cout << "Integrated current frame into model" << std::endl;
 
-        previousPose = frameData.getPose();
 
         // Predict current model surface and output as mesh
+        previousPose = frameData.getPose();
         model.predictSurface(frameData.getCameraSpecifications(), previousPose);
+        std::cout << "Predicted model surface after current frame" << std::endl;
+
         ss.str("");
         ss.clear();
         ss << outputDirectory << filenameBaseOut << stream.getCurrentFrameIndex() << ".off";
@@ -126,6 +129,7 @@ int main() {
                 cameraSpecs.imageWidth,
                 cameraSpecs.imageHeight
         );
+        std::cout << "Wrote mesh to " << ss.str() << std::endl;
     }
 
     return 0;
