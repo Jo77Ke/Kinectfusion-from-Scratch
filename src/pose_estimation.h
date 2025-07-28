@@ -14,6 +14,8 @@ bring them into previous frame's coordinate system
 
 #pragma once
 
+constexpr size_t MINIMUM_CORRESPONDENCES = 10;
+
 #include "utils.h"
 #include "model.h"
 #include "frame_data.h"
@@ -25,7 +27,7 @@ struct IcpParameters {
     float maxCorrespondenceDistance;
 
     IcpParameters(const int maxIter, const float termThresh, const float maxCorrDist)
-        : maxIterations(maxIter), terminationThreshold(termThresh), maxCorrespondenceDistance(maxCorrDist) {}
+            : maxIterations(maxIter), terminationThreshold(termThresh), maxCorrespondenceDistance(maxCorrDist) {}
 };
 
 Matrix4f estimateCameraPoseICP(
@@ -61,10 +63,13 @@ Matrix4f estimateCameraPoseICP(
                 const Vector4f p_k_curr_hom = currentVertex.position;
 
                 // Check if valid
-                if (p_k_curr_hom.x() == MINF) continue;
+                if (p_k_curr_hom.x() == MINF || p_k_curr_hom.y() == MINF || p_k_curr_hom.z() == MINF) continue;
 
                 // Move the point to the previousFrame's coordinate system
                 const Vector3f p_k_aligned = (currentEstimatedPose * p_k_curr_hom).head<3>();
+                if (!p_k_aligned.allFinite() || p_k_aligned.norm() > 1e6) {
+                    continue;
+                }
 
                 // Find correspondences via projective data association
                 // Assume point at pixel (u,v) in the current frame corresponds to point at the same pixel (u,v) in previous frame.
@@ -75,8 +80,16 @@ Matrix4f estimateCameraPoseICP(
                 const Vector3f n_k_prev = {n_k_prev_cv[0], n_k_prev_cv[1], n_k_prev_cv[2]}; // Target normal n_k
 
                 // Check if they are valid
-                if (q_k_prev_hom.x() == MINF || n_k_prev.x() == MINF || n_k_prev.norm() < 1e-6) continue;
+                if (q_k_prev_hom.x() == MINF || q_k_prev_hom.y() == MINF || q_k_prev_hom.z() == MINF) continue;
+                if (n_k_prev.x() == MINF || n_k_prev.y() == MINF || n_k_prev.z() == MINF || n_k_prev.norm() < 1e-6) continue;
                 if ((p_k_aligned - q_k_prev_hom.head<3>()).norm() > params.maxCorrespondenceDistance) continue;
+
+                if (std::isnan(p_k_aligned.x()) || std::isnan(n_k_prev.x())) {
+                    std::cerr << "Invalid p_k_aligned or n_k_prev at (" << u << ", " << v << ")" << std::endl;
+                    std::cerr << "p_k_aligned: " << p_k_aligned.transpose() << std::endl;
+                    std::cerr << "n_k_prev: " << n_k_prev.transpose() << std::endl;
+                    continue;
+                }
 
                 // Valid match
                 ++perThreadValid[threadId];
@@ -93,9 +106,21 @@ Matrix4f estimateCameraPoseICP(
                 J_k.block<1, 3>(0, 0) = n_k_prev.transpose();
                 // Change in error when we apply rotation (rx, ry, rz)
                 J_k.block<1, 3>(0, 3) = -n_k_prev.transpose() * (Matrix3f() <<
-                                                                            0, -p_k_aligned.z(), p_k_aligned.y(),
+                        0, -p_k_aligned.z(), p_k_aligned.y(),
                         p_k_aligned.z(), 0, -p_k_aligned.x(),
                         -p_k_aligned.y(), p_k_aligned.x(), 0).finished();
+
+                if (!J_k.allFinite()) {
+                    std::cerr << "Invalid Jacobian at (" << u << ", " << v << ")" << std::endl;
+                    std::cerr << "J_k: " << J_k << std::endl;
+                    continue;
+                }
+
+                if (J_k.hasNaN()) {
+                    std::cerr << "NaN in J_k at (" << u << ", " << v << ")" << std::endl;
+                    std::cerr << "J_k: " << J_k << std::endl;
+                    continue;
+                }
 
                 // 4. Sum up contributions from all matches to form the JtJ and JtE vector
                 perThreadJtJ[threadId] += J_k.transpose() * J_k;
@@ -116,13 +141,14 @@ Matrix4f estimateCameraPoseICP(
         }
 
         // Require minimum correspondences
-        if (validCorrespondences < 10) {
+        if (validCorrespondences < MINIMUM_CORRESPONDENCES) {
             std::cerr << "Too few valid correspondences in ICP" << std::endl;
             return currentEstimatedPose;
         }
 
         // 5. Solve JtJ * dx = -JtE for dx
-        Matrix<float, 6, 1> dx = JtJ.ldlt().solve(-JtE);
+        JtJ += Matrix<float, 6, 6>::Identity() * 1e-6; // Regularization to avoid singularity
+        Matrix<float, 6, 1> dx = JtJ.bdcSvd(ComputeThinU | ComputeThinV).solve(-JtE);
 
         // 6. Apply dx to current estimated pose
         Matrix4f dT = Matrix4f::Identity();

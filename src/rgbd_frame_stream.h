@@ -14,7 +14,7 @@ namespace fs = std::filesystem;
 
 class RGBDFrameStream {
 public:
-    RGBDFrameStream() : currentFrameIndex(-1), frameStride(10) {}
+    RGBDFrameStream() : currentFrameIndex(-1), frameStride(1) {}
 
     ~RGBDFrameStream() = default;
 
@@ -22,9 +22,9 @@ public:
         baseDirectory = datasetDirectory;
 
         // Read input file names and trajectories
-        if (!readFileList(datasetDirectory / "depth.txt", filenamesDepthImages, depthImagesTimeStamps)) return false;
-        if (!readFileList(datasetDirectory / "rgb.txt", filenamesColorImages, colorImagesTimeStamps)) return false;
-        if (!readTrajectoryFile(datasetDirectory / "groundtruth.txt")) return false;
+        if (!readFileList(datasetDirectory / "depth.txt", filenamesDepthImages, depthImagesTimeStamps)) throw std::runtime_error("Could not load depth images.");
+        if (!readFileList(datasetDirectory / "rgb.txt", filenamesColorImages, colorImagesTimeStamps)) throw std::runtime_error("Could not load color images.");
+        if (!readTrajectoryFile(datasetDirectory / "groundtruth.txt")) throw std::runtime_error("Could not load trajectories.");
 
         if (filenamesDepthImages.size() != filenamesColorImages.size()) return false;
         numberOfFrames = filenamesDepthImages.size();
@@ -83,10 +83,10 @@ private:
         timestamps.clear();
 
         std::string line;
-        while (fileDepthList.good() && std::getline(fileDepthList, line)) {
+        while (std::getline(fileDepthList, line)) {
             if (line.empty() || line[0] == '#') continue; // Skip comments and empty lines
 
-            std::istringstream ss(line);
+            std::stringstream ss(line);
             double timestamp;
             std::string filename;
 
@@ -100,16 +100,16 @@ private:
         return true;
     }
 
-    bool readTrajectoryFile(const std::string &filename) {
-        std::ifstream file(filename);
+    bool readTrajectoryFile(const fs::path &filepath) {
+        std::ifstream file(filepath);
         if (!file.is_open()) return false;
 
         trajectory.clear();
         std::string line;
-        while (file.good() && std::getline(file, line)) {
+        while (std::getline(file, line)) {
             if (line.empty() || line[0] == '#') continue; // Skip comments and empty lines
 
-            std::istringstream ss(line);
+            std::stringstream ss(line);
             double timestamp;
             float tx, ty, tz, qx, qy, qz, qw;
             ss >> timestamp >> tx >> ty >> tz >> qx >> qy >> qz >> qw;
@@ -120,7 +120,7 @@ private:
             }
 
             Eigen::Matrix4f transformation = Eigen::Matrix4f::Identity();
-            transformation.block<3, 3>(0, 0) = q.toRotationMatrix();
+            transformation.block<3, 3>(0, 0) = q.normalized().toRotationMatrix();
             transformation.block<3, 1>(0, 3) = Eigen::Vector3f(tx, ty, tz);
             transformation = transformation.inverse().eval(); // Invert to camera pose
 

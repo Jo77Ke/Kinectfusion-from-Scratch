@@ -39,15 +39,27 @@ public:
 
     const cv::Mat &getRawColorMap() const { return colorMap; }
 
-    const cv::Mat &getDepthPyramidAtLevel(int level) const {
+    const cv::Mat &getDepthMapAtPyramidLevel(int level) const {
+        if (level < 0 || level >= static_cast<int>(depthPyramid.size())) {
+            throw std::out_of_range("Invalid depth pyramid level: " + std::to_string(level));
+        }
+
         return depthPyramid[level];
     }
 
-    const cv::Mat &getVertexPyramidAtLevel(int level) const {
+    const cv::Mat &getVertexMapAtPyramidLevel(int level) const {
+        if (level < 0 || level >= static_cast<int>(vertexPyramid.size())) {
+            throw std::out_of_range("Invalid vertex pyramid level: " + std::to_string(level));
+        }
+
         return vertexPyramid[level];
     }
 
-    const cv::Mat &getNormalPyramidAtLevel(int level) const {
+    const cv::Mat &getNormalMapAtPyramidLevel(int level) const {
+        if (level < 0 || level >= static_cast<int>(normalPyramid.size())) {
+            throw std::out_of_range("Invalid normal pyramid level: " + std::to_string(level));
+        }
+
         return normalPyramid[level];
     }
 
@@ -135,54 +147,56 @@ public:
     }
 
     void buildPyramids(int levels, float sigmaS, float sigmaR) {
+        if (levels < 1) {
+            throw std::invalid_argument("Number of levels must be at least 1.");
+        }
+
         buildDepthPyramid(levels, sigmaS, sigmaR, depthPyramid, depthMap);
         buildVertexPyramid(depthPyramid, cameraSpecs, vertexPyramid);
         buildNormalPyramid(vertexPyramid, normalPyramid);
     }
 
-    void computeCameraCenterInGlobalSpace() {
-        cameraCenterInGlobalSpace = pose.col(3).head<3>();
+    void computeWorldToCameraCenter() {
+        worldToCameraCenter = (pose.inverse().eval()).topLeftCorner<3, 4>();
     }
 
     float tsdfValueAt(const Vector3f &globalPoint) const {
-        const Vector3f pointInCameraSpace = pose.topLeftCorner<3, 4>() * globalPoint.homogeneous();
+        // Transform the 3D point from global space to the camera's local space
+        const Vector3f pointInCameraSpace = worldToCameraCenter * globalPoint.homogeneous();
 
+        // Ignore voxels that are behind the camera
+        if (pointInCameraSpace.z() <= 0) {
+            return MINF;
+        }
+
+        // Project the 3D point into the 2D image plane
         Vector3f projectedPoint = cameraSpecs.intrinsics * pointInCameraSpace;
-        projectedPoint /= projectedPoint.z();
+        const Vector2i pixel(round(projectedPoint.x() / projectedPoint.z()),
+                             round(projectedPoint.y() / projectedPoint.z()));
 
-        const Vector3i pixel = projectedPoint.cast<int>(); // Nearest neighbor projection via rounding down
-        // Check if within image bounds
-        if (pixel.x() < 0 || pixel.x() >= imageWidth ||
-            pixel.y() < 0 || pixel.y() >= imageHeight) {
+        // Ignore voxels that project outside the image bounds
+        if (pixel.x() < 0 || pixel.x() >= imageWidth || pixel.y() < 0 || pixel.y() >= imageHeight) {
             return MINF;
         }
 
-        const float depthValue = depthMap.at<float>(pixel.y(), pixel.x());
-        // Check if depth value is valid
-        if (depthValue == MINF) {
+        // Get the measured depth from the depth map at the projected pixel
+        const float measuredDepth = depthMap.at<float>(pixel.y(), pixel.x());
+
+        // Ignore pixels with invalid depth measurements
+        if (measuredDepth <= 0.0f || measuredDepth == MINF) {
             return MINF;
         }
 
-        const float normalizationFactor = (cameraSpecs.intrinsicsInverse * pixel.cast<float>()).norm();
-        // Check if normalization factor is valid
-        if (normalizationFactor == 0.0f) {
+        // Calculate the difference between the measured depth and the point's actual depth
+        const float sdf = measuredDepth - pointInCameraSpace.z();
+
+        // Ignore points that are outside the truncation radius
+        if (std::abs(sdf) > TRUNCATION_RADIUS) {
             return MINF;
         }
 
-        const float rayDepth = (cameraCenterInGlobalSpace - globalPoint).norm() / normalizationFactor;
-        // Check if ray depth is valid
-        if (rayDepth < 0.0f) {
-            return MINF;
-        }
-
-        const float deltaDepth = rayDepth - depthValue;
-        const float absoluteDeltaDepth = std::abs(deltaDepth);
-        // Truncate points that are too far away from the surface
-        if (absoluteDeltaDepth > TRUNCATION_RADIUS) {
-            return MINF;
-        }
-
-        return std::min(1.0f, absoluteDeltaDepth / TRUNCATION_RADIUS) * static_cast<float>(sgn(deltaDepth));
+        // Scale the sdf to be between -1.0 and 1.0.
+        return std::max(-1.0f, std::min(1.0f, sdf / TRUNCATION_RADIUS));
     }
 
 private:
@@ -202,7 +216,7 @@ private:
     cv::Mat validityMap; // 1 for valid pixels, 0 for invalid
     cv::Mat normalMap;
 
-    Vector3f cameraCenterInGlobalSpace;
+    Matrix<float, 3, 4> worldToCameraCenter;
     std::vector<cv::Mat> depthPyramid;
     std::vector<cv::Mat> vertexPyramid;
     std::vector<cv::Mat> normalPyramid;

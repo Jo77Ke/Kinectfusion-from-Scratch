@@ -29,7 +29,7 @@ void bilateralFilter(
         float* denoisedRow = denoisedDepthMap.ptr<float>(v1);
 
         for (int u1 = 0; u1 < imageWidth; ++u1) {
-            const Eigen::Vector2i pixel1(u1, v1);
+            const Vector2i pixel1(u1, v1);
             float depth1 = depthRow[u1];
 
             if (depth1 == MINF) { // Skip pixels with no depth information
@@ -43,14 +43,14 @@ void bilateralFilter(
             for (int v2 = std::max(v1 - halfWidth, 0); v2 <= std::min(v1 + halfWidth, (int) imageHeight - 1); ++v2) {
                 const float* depthRow2 = depthMap.ptr<float>(v2);
                 for (int u2 = std::max(u1 - halfWidth, 0); u2 <= std::min(u1 + halfWidth, (int) imageWidth - 1); ++u2) {
-                    const Eigen::Vector2i pixel2(u2, v2);
+                    const Vector2i pixel2(u2, v2);
                     float depth2 = depthRow2[u2];
 
                     if (depth2 == MINF) { // Skip pixels with no depth information
                         continue;
                     }
 
-                    const auto spatialDistance = static_cast<float>((pixel1 - pixel2).lpNorm<2>());
+                    const auto spatialDistance = static_cast<float>((pixel1 - pixel2).norm());
                     const auto intensityDistance = static_cast<float>(std::abs(depth1 - depth2));
 
                     const float spatialWeight = gaussian(spatialDistance, (float) sigma_s);

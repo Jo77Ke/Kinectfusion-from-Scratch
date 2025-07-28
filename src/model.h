@@ -94,6 +94,9 @@ public:
                 )) {
                     vertexRow[u].position = intersection.position;
                     vertexRow[u].color = intersection.color;
+                } else {
+                    vertexRow[u].position = Vector4f(MINF, MINF, MINF, MINF);
+                    vertexRow[u].color = cv::Vec4b(0, 0, 0, 0);
                 }
 
                 computeNormalFromTSDF(vertexRow[u].position.head<3>(), normalRow[u]);
@@ -115,11 +118,19 @@ public:
         return normalMap;
     }
 
-    const cv::Mat &getVertexPyramidAtLevel(int level) const {
+    const cv::Mat &getVertexMapAtPyramidLevel(int level) const {
+        if (level < 0 || level >= static_cast<int>(vertexPyramid.size())) {
+            throw std::out_of_range("Invalid vertex pyramid level");
+        }
+
         return vertexPyramid[level];
     }
 
-    const cv::Mat &getNormalPyramidAtLevel(int level) const {
+    const cv::Mat &getNormalMapAtPyramidLevel(int level) const {
+        if (level < 0 || level >= static_cast<int>(normalPyramid.size())) {
+            throw std::out_of_range("Invalid normal pyramid level");
+        }
+
         return normalPyramid[level];
     }
 
@@ -161,7 +172,8 @@ private:
         TSDFVoxel voxel = voxelGrid[flattenVoxelIndex(getVoxelIndices(p))];
 
         float sdf = voxel.sdf;
-        float step = (sdf > TRUNCATION_RADIUS) ? TRUNCATION_RADIUS : std::max(sdf, voxelSize);
+        float sdfMetric = sdf * TRUNCATION_RADIUS;
+        float step = std::max(sdfMetric, voxelSize);
         t += step;
         float prevSDF = sdf;
 
@@ -192,7 +204,8 @@ private:
             }
 
             // Set step size based on the truncated SDF value while ensuring to land in a new voxel
-            step = (sdf > TRUNCATION_RADIUS) ? TRUNCATION_RADIUS : std::max(sdf, voxelSize);
+            sdfMetric = sdf * TRUNCATION_RADIUS;
+            step = std::max(sdfMetric, voxelSize);
             t += step;
             prevSDF = sdf;
         }

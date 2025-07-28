@@ -3,7 +3,9 @@
 #include "utils.h"
 #include "frame_data.h"
 #include "bilateral_filter.h"
-#include "sub_sampling.h"
+#include "camera_specs.h"
+#include "output.h"
+
 
 void buildDepthPyramid(
         int levels, const float sigma_s, float sigma_r,
@@ -18,22 +20,31 @@ void buildDepthPyramid(
     bilateralFilter(rawDepthMap, depthPyramid[0], sigma_s, sigma_r);
 
     for (int l = 1; l < levels; ++l) {
-        const cv::Mat &prev = depthPyramid[l - 1];
-        const int w = prev.cols / 2;
-        const int h = prev.rows / 2;
+        const cv::Mat &depthMapAtPreviousLevel = depthPyramid[l - 1];
+        const int w = depthMapAtPreviousLevel.cols / 2;
+        const int h = depthMapAtPreviousLevel.rows / 2;
 
-        cv::Mat current = cv::Mat::zeros(h, w, CV_32F);
+        cv::Mat depthMapAtLevel = cv::Mat(h, w, CV_32FC1, cv::Scalar(MINF));
 #pragma omp parallel for
-        for (int y = 0; y < h; ++y) {
-            for (int x = 0; x < w; ++x) {
+        for (int v = 0; v < h; ++v) {
+            float *depthRow = depthMapAtLevel.ptr<float>(v);
+            const float *depthRowPrev = depthMapAtPreviousLevel.ptr<float>(v * 2);
+            for (int u = 0; u < w; ++u) {
                 std::vector<float> validValues;
-                float center = prev.at<float>(y * 2, x * 2);
+                float center = depthRowPrev[u * 2];
 
-                if (center == MINF) continue;
+                if (center == MINF) {
+                    depthRow[u] = MINF;
+                    continue;
+                }
 
                 for (int dy = 0; dy <= 1; ++dy) {
                     for (int dx = 0; dx <= 1; ++dx) {
-                        float val = prev.at<float>(y * 2 + dy, x * 2 + dx);
+                        int yy = v * 2 + dy;
+                        int xx = u * 2 + dx;
+                        if (yy >= depthMapAtPreviousLevel.rows || xx >= depthMapAtPreviousLevel.cols) continue;
+
+                        float val = depthMapAtPreviousLevel.at<float>(yy, xx);
                         if (val != MINF && std::abs(val - center) <= 3.0f * sigma_r) {
                             validValues.push_back(val);
                         }
@@ -43,14 +54,14 @@ void buildDepthPyramid(
                 if (!validValues.empty()) {
                     float avg = std::accumulate(validValues.begin(), validValues.end(), 0.0f) /
                                 static_cast<float>(validValues.size());
-                    current.at<float>(y, x) = avg;
+                    depthRow[u] = avg;
                 } else {
-                    current.at<float>(y, x) = MINF;
+                    depthRow[u] = MINF;
                 }
             }
         }
 
-        depthPyramid[l] = current;
+        depthPyramid[l] = depthMapAtLevel;
     }
 }
 
@@ -63,26 +74,37 @@ void buildVertexPyramid(
     vertexPyramid.resize(depthPyramid.size());
 
     for (size_t l = 0; l < depthPyramid.size(); ++l) {
-        const cv::Mat &depth = depthPyramid[l];
-        const int h = depth.rows;
-        const int w = depth.cols;
-        cv::Mat vertexMapLevel = cv::Mat(h, w, CV_32FC4);
+        const cv::Mat &depthMapAtLevel = depthPyramid[l];
+        const int h = depthMapAtLevel.rows;
+        const int w = depthMapAtLevel.cols;
+        cv::Mat vertexMapAtLevel = cv::Mat(h, w, CV_8UC(sizeof(Vertex)), cv::Mat::AUTO_STEP);
+
+        float scale = 1.0f / (1.0f * (1 << l));
+        Matrix3f scaledIntrinsicsInverse = cameraSpecs.intrinsicsInverse;
+        scaledIntrinsicsInverse(0, 0) *= scale;
+        scaledIntrinsicsInverse(1, 1) *= scale;
+        scaledIntrinsicsInverse(0, 2) = (scaledIntrinsicsInverse(0, 2) + 0.5f) * scale - 0.5f;
+        scaledIntrinsicsInverse(1, 2) = (scaledIntrinsicsInverse(1, 2) + 0.5f) * scale - 0.5f;
 
 #pragma omp parallel for
         for (int v = 0; v < h; ++v) {
+            const float *depthRow = depthMapAtLevel.ptr<float>(v);
+            Vertex *vertexRow = reinterpret_cast<Vertex *>(vertexMapAtLevel.ptr(v));
             for (int u = 0; u < w; ++u) {
-                float d = depth.at<float>(v, u);
+                float d = depthRow[u];
+
                 if (d == MINF) {
-                    vertexMapLevel.at<cv::Vec4f>(v, u) = cv::Vec4f(MINF, MINF, MINF, MINF);
+                    vertexRow[u].position = Vector4f(MINF, MINF, MINF, MINF);
                     continue;
                 }
 
-                Vector3f pos = cameraSpecs.intrinsicsInverse * d * Vector2i(u, v).cast<float>().homogeneous();
-                vertexMapLevel.at<cv::Vec4f>(v, u) = cv::Vec4f(pos.x(), pos.y(), pos.z(), 1.0f);
+                Vector2i pixel(u, v);
+                Vector3f pos = scaledIntrinsicsInverse * (d * pixel.cast<float>().homogeneous());
+
+                vertexRow[u].position = pos.homogeneous();
             }
         }
-
-        vertexPyramid[l] = vertexMapLevel;
+        vertexPyramid[l] = vertexMapAtLevel;
     }
 }
 
@@ -102,76 +124,102 @@ void buildNormalPyramid(
 
 #pragma omp parallel for
         for (int v = 0; v < h - 1; ++v) {
+            cv::Vec4f *normalRow = normalMap.ptr<cv::Vec4f>(v);
+            const Vertex *vertexRow = reinterpret_cast<const Vertex *>(vertexMap.ptr(v));
+            const Vertex *vertexRowBelow = reinterpret_cast<const Vertex *>(vertexMap.ptr(v + 1));
             for (int u = 0; u < w - 1; ++u) {
-                const auto &center = vertexMap.at<cv::Vec4f>(v, u);
-                const auto &right = vertexMap.at<cv::Vec4f>(v, u + 1);
-                const auto &down = vertexMap.at<cv::Vec4f>(v + 1, u);
+                const auto &center = vertexRow[u];
+                const auto &right = vertexRow[u + 1];
+                const auto &down = vertexRowBelow[u];
 
-                if (center[0] == MINF || right[0] == MINF || down[0] == MINF) {
-                    normalMap.at<cv::Vec4f>(v, u) = cv::Vec4f(MINF, MINF, MINF, MINF);
+                if (center.position.x() == MINF || right.position.x() == MINF || down.position.x() == MINF) {
+                    normalRow[u] = cv::Vec4f(MINF, MINF, MINF, MINF);
                     continue;
                 }
 
-                Vector3f du = Vector3f(right[0], right[1], right[2]) - Vector3f(center[0], center[1], center[2]);
-                Vector3f dv = Vector3f(down[0], down[1], down[2]) - Vector3f(center[0], center[1], center[2]);
+                Vector3f du = right.position.head<3>() - center.position.head<3>();
+                Vector3f dv = down.position.head<3>() - center.position.head<3>();
 
-                Vector3f n = du.cross(dv).normalized();
-                normalMap.at<cv::Vec4f>(v, u) = cv::Vec4f(n.x(), n.y(), n.z(), 1.0f);
+                Vector3f n = du.cross(dv);
+                if (n.norm() < 1e-6) {
+                    normalRow[u] = cv::Vec4f(MINF, MINF, MINF, MINF);
+                    continue;
+                }
+                n.normalize();
+
+                normalRow[u] = cv::Vec4f(n.x(), n.y(), n.z(), 1.0f);
             }
         }
 
+        // Handle borders
+#pragma omp parallel for
+        for (int v = 0; v < h; ++v) {
+            normalMap.at<cv::Vec4f>(v, w - 1) = cv::Vec4f(MINF, MINF, MINF, MINF);
+        }
+
+#pragma omp parallel for
+        for (int u = 0; u < w; ++u) {
+            normalMap.at<cv::Vec4f>(h - 1, u) = cv::Vec4f(MINF, MINF, MINF, MINF);
+        }
         normalPyramid[l] = normalMap;
+
     }
 }
 
-void buildVertexPyramidFromVertexMap(int levels, float sigma_r,  const cv::Mat &vertexMap, std::vector<cv::Mat> &vertexPyramid) {
+void buildVertexPyramidFromVertexMap(int levels, float sigma_r, const cv::Mat &vertexMap,
+                                     std::vector<cv::Mat> &vertexPyramid) {
     vertexPyramid.clear();
     vertexPyramid.resize(levels);
 
     vertexPyramid[0] = vertexMap.clone();
 
     for (int l = 1; l < levels; ++l) {
-        const cv::Mat &prev = vertexPyramid[l - 1];
-        const int w = prev.cols / 2;
-        const int h = prev.rows / 2;
+        const cv::Mat &vertexMapAtPreviousLevel = vertexPyramid[l - 1];
+        const int w = vertexMapAtPreviousLevel.cols / 2;
+        const int h = vertexMapAtPreviousLevel.rows / 2;
 
-        cv::Mat current = cv::Mat(h, w, CV_32FC4);
+        cv::Mat vertexMapAtLevel = cv::Mat(h, w, CV_8UC(sizeof(Vertex)), cv::Mat::AUTO_STEP);
 
 #pragma omp parallel for
-        for (int y = 0; y < h; ++y) {
-            for (int x = 0; x < w; ++x) {
-                cv::Vec4f center = prev.at<cv::Vec4f>(y * 2, x * 2);
-                if (center[2] == MINF) {
-                    current.at<cv::Vec4f>(y, x) = cv::Vec4f(MINF, MINF, MINF, MINF);
+        for (int v = 0; v < h; ++v) {
+            const Vertex *centerVertexRowPrev = reinterpret_cast<const Vertex *>(vertexMapAtPreviousLevel.ptr(v * 2));
+            Vertex *vertexRow = reinterpret_cast<Vertex *>(vertexMapAtLevel.ptr(v));
+            for (int u = 0; u < w; ++u) {
+                Vertex center = centerVertexRowPrev[u * 2];
+                if (center.position.x() == MINF) {
+                    vertexRow[u].position = Vector4f(MINF, MINF, MINF, MINF);
                     continue;
                 }
 
-                std::vector<cv::Vec3f> validPoints;
+                std::vector<Vector3f> validPoints;
 
                 for (int dy = 0; dy <= 1; ++dy) {
                     for (int dx = 0; dx <= 1; ++dx) {
-                        int yy = y * 2 + dy;
-                        int xx = x * 2 + dx;
-                        if (yy >= prev.rows || xx >= prev.cols) continue;
+                        int yy = v * 2 + dy;
+                        int xx = u * 2 + dx;
+                        if (yy >= vertexMapAtPreviousLevel.rows || xx >= vertexMapAtPreviousLevel.cols) continue;
 
-                        cv::Vec4f sample = prev.at<cv::Vec4f>(yy, xx);
-                        if (sample[2] != MINF && std::abs(sample[2] - center[2]) < 3.0f * sigma_r) {
-                            validPoints.push_back(cv::Vec3f(sample[0], sample[1], sample[2]));
+                        const Vertex &sampleVertex = vertexMapAtPreviousLevel.at<const Vertex>(yy, xx);
+                        if (
+                                sampleVertex.position.x() != MINF && sampleVertex.position.y() != MINF
+                                && sampleVertex.position.z() != MINF
+                                && (sampleVertex.position - center.position).norm() < 3.0f * sigma_r
+                                ) {
+                            validPoints.emplace_back(sampleVertex.position.head<3>());
                         }
                     }
                 }
 
                 if (!validPoints.empty()) {
-                    cv::Vec3f avg(0, 0, 0);
-                    for (const auto &pt : validPoints) avg += pt;
+                    Vector3f avg(0, 0, 0);
+                    for (const auto &pt: validPoints) avg += pt;
                     avg /= static_cast<float>(validPoints.size());
-                    current.at<cv::Vec4f>(y, x) = cv::Vec4f(avg[0], avg[1], avg[2], 1.0f);
+                    vertexRow[u].position = avg.homogeneous();
                 } else {
-                    current.at<cv::Vec4f>(y, x) = cv::Vec4f(MINF, MINF, MINF, MINF);
+                    vertexRow[u].position = Vector4f(MINF, MINF, MINF, MINF);
                 }
             }
         }
-
-        vertexPyramid[l] = current;
+        vertexPyramid[l] = vertexMapAtLevel;
     }
 }
