@@ -31,10 +31,9 @@ Replace `<N_THREADS>` with the number of threads you want to use.
 ### Volumetric Fusion
 - [x] Compute projective TSDF
 - [x] Implement running average for incrementally adding a new frame
-- [ ] Implement VoxelHashing to reduce memory usage
 
 ### Surface Prediction
 - [x] Implement ray-casting
 
 ### Pose Estimation
-- [ ] Implement ICP
+- [x] Implement ICP
