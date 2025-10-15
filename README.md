@@ -1,19 +1,12 @@
-# KinectFusion
+# KinectFusion from Scratch
 
-## Installation
+## Project description
+To deepen our understanding in 3D Surface reconstruction, we worked on re-implementing the KinectFusion pipeline, presented by [Newcombe et al.](https://ieeexplore.ieee.org/document/6162880), from scratch.
 
-```bash
-    sudo apt update -qq -y && sudo apt upgrade -qq -y && sudo apt install -qq -y build-essentials libeigen3-dev libopencv-dev
-```
+## Dataset
+To test our implmentation, we used pre-recorded RGB-D data provided in Sturm et al.'s [A benchmark for the evaluation of RGB-D SLAM systems](https://ieeexplore.ieee.org/document/6385773).
 
-## Setting environment variables to configure OpenMP parallelization
-
-```bash
-    export OMP_NUM_THREADS=<N_THREADS>;OMP_PROC_BIND=true;OMP_PLACES=cores
-```
-Replace `<N_THREADS>` with the number of threads you want to use.
-
-## Checklist
+## Approach
 
 ### Input
 - [x] Read depth and rgb images from sensor into depth and color maps
@@ -37,3 +30,22 @@ Replace `<N_THREADS>` with the number of threads you want to use.
 
 ### Pose Estimation
 - [x] Implement ICP
+
+## Installation & Configuration
+
+### Installing dependencies
+```bash
+    sudo apt update -qq -y && sudo apt upgrade -qq -y && sudo apt install -qq -y build-essentials libeigen3-dev libopencv-dev
+```
+
+### Setting environment variables to configure OpenMP parallelization
+```bash
+    export OMP_NUM_THREADS=<N_THREADS>;OMP_PROC_BIND=true;OMP_PLACES=cores
+```
+Replace `<N_THREADS>` with the number of threads you want to use.
+
+## Contributors
+- Emre Durak
+- Julian Eulenburg
+- Constantin Daiß
+- Jonas Keller
